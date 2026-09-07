@@ -1149,8 +1149,8 @@ mod tests {
     fn redact_turns_replaces_secrets_in_block_text() {
         struct Fake(Vec<scan::Finding>);
         impl scan::SecretScanner for Fake {
-            fn scan(&self, _blob: &str) -> Result<Vec<scan::Finding>> {
-                Ok(self.0.clone())
+            fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
+                Ok(texts.iter().map(|_| self.0.clone()).collect())
             }
         }
         let scanner = Fake(vec![
@@ -1195,13 +1195,14 @@ mod tests {
     fn redact_only_scans_the_pass_tier_blocks() {
         struct Fake;
         impl scan::SecretScanner for Fake {
-            fn scan(&self, _blob: &str) -> Result<Vec<scan::Finding>> {
-                Ok(vec![scan::Finding {
+            fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
+                let hit = scan::Finding {
                     detector: "PrivateKey".into(),
                     raw: "SECRET".into(),
                     line: None,
                     decoder: "PLAIN".into(),
-                }])
+                };
+                Ok(texts.iter().map(|_| vec![hit.clone()]).collect())
             }
         }
         let block = |bt: &str, text: &str| traces::Block {
@@ -1241,9 +1242,9 @@ mod tests {
     fn elide_turns_strips_payloads_before_anything_scans_them() {
         struct Recorder(std::cell::RefCell<String>);
         impl scan::SecretScanner for Recorder {
-            fn scan(&self, blob: &str) -> Result<Vec<scan::Finding>> {
-                self.0.borrow_mut().push_str(blob);
-                Ok(Vec::new())
+            fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<scan::Finding>>> {
+                self.0.borrow_mut().push_str(&texts.join("\n"));
+                Ok(texts.iter().map(|_| Vec::new()).collect())
             }
         }
         let mut turns = vec![traces::Turn {

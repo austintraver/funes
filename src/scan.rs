@@ -45,8 +45,9 @@ pub struct Finding {
 /// A pluggable secret-detection engine. The rest of this module — redaction, the allowlist, the
 /// gate — depends only on this, never on a specific tool.
 pub trait SecretScanner {
-    /// Every potential secret in `blob`. Fail-closed: `Err` means "couldn't scan", never "clean".
-    fn scan(&self, blob: &str) -> Result<Vec<Finding>>;
+    /// What was found in each of `texts`, one entry per text: `out[i]` holds the secrets in
+    /// `texts[i]`. Fail-closed: `Err` means "couldn't scan", never "clean".
+    fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<Finding>>>;
 }
 
 /// The default engine: trufflehog, run offline (no verification) over the text.
@@ -64,9 +65,12 @@ impl Trufflehog {
 }
 
 impl SecretScanner for Trufflehog {
-    fn scan(&self, blob: &str) -> Result<Vec<Finding>> {
+    fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<Finding>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
         let dir = tempfile::tempdir().context("creating a temp dir for the secret scan")?;
-        std::fs::write(dir.path().join("blob.txt"), blob).context("staging text for the scan")?;
+        std::fs::write(dir.path().join("blob.txt"), texts.join("\n")).context("staging text for the scan")?;
         let out = Command::new(&self.bin)
             .arg("filesystem")
             .arg(dir.path())
@@ -81,8 +85,69 @@ impl SecretScanner for Trufflehog {
             .output()
             .with_context(|| format!("running trufflehog at {}", self.bin.display()))?;
 
-        interpret_scan_output(out.status.code(), &out.stdout, &out.stderr)
+        let findings = interpret_scan_output(out.status.code(), &out.stdout, &out.stderr)?;
+        group_by_line(texts, findings)
     }
+}
+
+/// Which text each secret came from, read off the line trufflehog reported: the text whose lines in
+/// the joined blob cover that line. A secret reported with no line falls back to a search for its
+/// value. Fail-closed when neither works — a secret no text owns can be neither redacted nor held
+/// back.
+fn group_by_line(texts: &[&str], findings: Vec<Finding>) -> Result<Vec<Vec<Finding>>> {
+    let mut out: Vec<Vec<Finding>> = (0..texts.len()).map(|_| Vec::new()).collect();
+    if findings.is_empty() {
+        return Ok(out);
+    }
+
+    // Line span [start, end) of each text in the joined blob (1-based). `join("\n")` puts one
+    // newline between texts, so text i+1 begins on the line right after text i ends.
+    let mut spans = Vec::with_capacity(texts.len());
+    let mut cursor = 1usize;
+    for t in texts {
+        let lines = t.split('\n').count().max(1);
+        spans.push((cursor, cursor + lines));
+        cursor += lines;
+    }
+
+    for (finding, f) in findings.into_iter().enumerate() {
+        match f.line {
+            // Primary: map the reported line to the text whose span contains it.
+            Some(line) => {
+                let i = spans.iter().position(|&(s, e)| line >= s && line < e).ok_or_else(|| {
+                    anyhow!(
+                        "secret-scanner finding {} reports line {line} outside the scanned text; refusing to continue",
+                        finding + 1
+                    )
+                })?;
+                out[i].push(f);
+            }
+            // Fall back to raw containment when the scanner has no line information.
+            None => {
+                let needle = f.raw.trim().to_string();
+                if needle.is_empty() {
+                    bail!(
+                        "secret-scanner finding {} has neither a line nor a usable match; refusing to continue",
+                        finding + 1
+                    );
+                }
+                let mut mapped = false;
+                for (i, t) in texts.iter().enumerate() {
+                    if t.contains(&needle) {
+                        out[i].push(f.clone());
+                        mapped = true;
+                    }
+                }
+                if !mapped {
+                    bail!(
+                        "secret-scanner finding {} could not be attributed to scanned text; refusing to continue",
+                        finding + 1
+                    );
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn interpret_scan_output(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Vec<Finding>> {
@@ -189,72 +254,21 @@ fn find_in(env: impl Fn(&str) -> Option<OsString>, exists: impl Fn(&Path) -> boo
     })
 }
 
-/// The one place a scanner is invoked for *block-level* detection. Scans `texts` together in a
-/// single pass and attributes each finding to the text it falls in — by **line number**, not by
-/// matching `raw`. The line number is robust where `raw`-substring matching is not: an escaped or
-/// quoted key still maps to the right text, because the line doesn't depend on the stored bytes
-/// matching trufflehog's canonical form. `texts` must each be a contiguous unit (a reconstructed
-/// block), so a secret never straddles two. `out[i]` holds the findings located in `texts[i]`.
-/// Redaction ([`excise`]) and the drop/hold-back decisions are derived from this result without
-/// re-scanning. Fail-closed on the scanner.
+/// The one place a scanner is invoked for *block-level* detection: scans `texts` in one pass and
+/// returns what it found in each of them. `texts` must each be a contiguous unit (a reconstructed
+/// block), so a secret never straddles two. Redaction ([`excise`]) and the drop/hold-back decisions
+/// come from this result without re-scanning. Fail-closed on the scanner, and on one that answers
+/// for fewer texts than it was given — the rest would go unscanned.
 pub fn scan_blocks(texts: &[&str], scanner: &dyn SecretScanner) -> Result<Vec<Vec<Finding>>> {
-    let mut out: Vec<Vec<Finding>> = (0..texts.len()).map(|_| Vec::new()).collect();
-    if texts.is_empty() {
-        return Ok(out);
+    let per_text = scanner.scan(texts)?;
+    if per_text.len() != texts.len() {
+        bail!(
+            "secret scanner answered for {} text(s) but was given {}; refusing to treat them as clean",
+            per_text.len(),
+            texts.len()
+        );
     }
-    let findings = scanner.scan(&texts.join("\n"))?;
-    if findings.is_empty() {
-        return Ok(out);
-    }
-
-    // Line span [start, end) of each text in the joined blob (1-based). `join("\n")` puts one
-    // newline between texts, so text i+1 begins on the line right after text i ends.
-    let mut spans = Vec::with_capacity(texts.len());
-    let mut cursor = 1usize;
-    for t in texts {
-        let lines = t.split('\n').count().max(1);
-        spans.push((cursor, cursor + lines));
-        cursor += lines;
-    }
-
-    for (finding, f) in findings.into_iter().enumerate() {
-        match f.line {
-            // Primary: map the reported line to the text whose span contains it.
-            Some(line) => {
-                let i = spans.iter().position(|&(s, e)| line >= s && line < e).ok_or_else(|| {
-                    anyhow!(
-                        "secret-scanner finding {} reports line {line} outside the scanned text; refusing to continue",
-                        finding + 1
-                    )
-                })?;
-                out[i].push(f);
-            }
-            // Fall back to raw containment when the scanner has no line information.
-            None => {
-                let needle = f.raw.trim().to_string();
-                if needle.is_empty() {
-                    bail!(
-                        "secret-scanner finding {} has neither a line nor a usable match; refusing to continue",
-                        finding + 1
-                    );
-                }
-                let mut mapped = false;
-                for (i, t) in texts.iter().enumerate() {
-                    if t.contains(&needle) {
-                        out[i].push(f.clone());
-                        mapped = true;
-                    }
-                }
-                if !mapped {
-                    bail!(
-                        "secret-scanner finding {} could not be attributed to scanned text; refusing to continue",
-                        finding + 1
-                    );
-                }
-            }
-        }
-    }
-    Ok(out)
+    Ok(per_text)
 }
 
 /// The outcome of excising one block's secrets; see [`excise`].
@@ -363,15 +377,6 @@ pub fn summary<'a>(detectors: impl IntoIterator<Item = &'a str>) -> String {
 mod tests {
     use super::*;
 
-    /// A scanner with canned findings — lets the redaction/allowlist logic be tested without
-    /// trufflehog (and exercises the trait seam).
-    struct FakeScanner(Vec<Finding>);
-    impl SecretScanner for FakeScanner {
-        fn scan(&self, _blob: &str) -> Result<Vec<Finding>> {
-            Ok(self.0.clone())
-        }
-    }
-
     fn finding(detector: &str, raw: &str) -> Finding {
         Finding {
             detector: detector.to_string(),
@@ -448,11 +453,11 @@ mod tests {
 
     /// Detectors located in each text — the view `scan_blocks` callers derive for "which texts are
     /// dirty, with what".
-    fn detectors(texts: &[&str], scanner: &dyn SecretScanner) -> Vec<Vec<String>> {
-        scan_blocks(texts, scanner)
+    fn detectors_by_line(texts: &[&str], findings: Vec<Finding>) -> Vec<Vec<String>> {
+        group_by_line(texts, findings)
             .unwrap()
-            .into_iter()
-            .map(|fs| fs.into_iter().map(|f| f.detector).collect())
+            .iter()
+            .map(|fs| detectors(fs))
             .collect()
     }
 
@@ -526,28 +531,27 @@ mod tests {
     }
 
     #[test]
-    fn scan_blocks_maps_findings_to_texts_by_line() {
+    fn group_by_line_finds_the_text_a_secret_is_in() {
         // Two single-line texts then a 3-line one. A finding on line 4 (the second line of text 2)
         // must be attributed to text 2 — by line range, never by `raw`.
-        let scanner = FakeScanner(vec![finding_at("PrivateKey", 4)]);
-        let hits = detectors(&["alpha", "beta", "k1\nk2\nk3"], &scanner);
+        let hits = detectors_by_line(&["alpha", "beta", "k1\nk2\nk3"], vec![finding_at("PrivateKey", 4)]);
         assert_eq!(hits[0], Vec::<String>::new());
         assert_eq!(hits[1], Vec::<String>::new());
         assert_eq!(hits[2], vec!["PrivateKey".to_string()]);
     }
 
     #[test]
-    fn scan_blocks_does_not_use_raw_so_escaping_cannot_hide_a_secret() {
+    fn group_by_line_does_not_use_raw_so_escaping_cannot_hide_a_secret() {
         // The regression that leaked: `raw` (real newlines) is NOT a substring of the stored text
         // (escaped `\n`). Value-matching misses it; the reported line number does not.
         let escaped = "[tool_result] key: -----BEGIN-----\\nABC\\n-----END-----";
-        let scanner = FakeScanner(vec![Finding {
+        let finding = Finding {
             detector: "PrivateKey".to_string(),
             raw: "-----BEGIN-----\nABC\n-----END-----".to_string(), // real newlines: not in `escaped`
             line: Some(2),
             decoder: "PLAIN".to_string(),
-        }]);
-        let hits = detectors(&["clean chatter", escaped, "more chatter"], &scanner);
+        };
+        let hits = detectors_by_line(&["clean chatter", escaped, "more chatter"], vec![finding]);
         assert_eq!(
             hits[1],
             vec!["PrivateKey".to_string()],
@@ -557,19 +561,34 @@ mod tests {
     }
 
     #[test]
-    fn scan_blocks_falls_back_to_raw_when_a_finding_has_no_line() {
+    fn group_by_line_falls_back_to_raw_when_a_finding_has_no_line() {
         // A scanner that reports no line still flags via `raw` containment rather than passing.
-        let scanner = FakeScanner(vec![finding("AWS", "SEKRET")]);
-        let hits = detectors(&["nothing here", "contains SEKRET inline"], &scanner);
+        let hits = detectors_by_line(
+            &["nothing here", "contains SEKRET inline"],
+            vec![finding("AWS", "SEKRET")],
+        );
         assert!(hits[0].is_empty());
         assert_eq!(hits[1], vec!["AWS".to_string()]);
     }
 
     #[test]
-    fn scan_blocks_rejects_an_unmappable_finding() {
-        let scanner = FakeScanner(vec![finding_at("PrivateKey", 99)]);
-        let err = scan_blocks(&["only one line"], &scanner).unwrap_err().to_string();
+    fn group_by_line_rejects_a_finding_it_cannot_place() {
+        let err = group_by_line(&["only one line"], vec![finding_at("PrivateKey", 99)])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("outside the scanned text"), "{err}");
+    }
+
+    #[test]
+    fn scan_blocks_rejects_a_scanner_that_answers_for_the_wrong_number_of_texts() {
+        struct Short;
+        impl SecretScanner for Short {
+            fn scan(&self, _texts: &[&str]) -> Result<Vec<Vec<Finding>>> {
+                Ok(vec![Vec::new()])
+            }
+        }
+        let err = scan_blocks(&["alpha", "beta"], &Short).unwrap_err().to_string();
+        assert!(err.contains("answered for 1 text(s) but was given 2"), "{err}");
     }
 
     #[test]
@@ -598,10 +617,11 @@ mod tests {
             return;
         }
         let blob = std::fs::read_to_string(&key).unwrap();
-        let findings = scanner.scan(&blob).expect("scan");
+        let found = scanner.scan(&[blob.as_str()]).expect("scan");
         assert!(
-            findings.iter().any(|f| f.detector == "PrivateKey"),
-            "expected a PrivateKey finding, got {findings:?}"
+            found[0].iter().any(|f| f.detector == "PrivateKey"),
+            "expected a PrivateKey finding, got {:?}",
+            detectors(&found[0])
         );
     }
 }
