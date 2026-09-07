@@ -630,8 +630,8 @@ impl Skipped {
 /// Scan the to-push `batches` and hold back every row of any *block* that holds a secret, returning
 /// the clean batches and what was held back. Detection works at block granularity: a block's chunks
 /// are reconstructed into their contiguous text (so a secret `split` cut across chunks is whole and
-/// detectable), scanned in one pass, and a finding is attributed to its block by line number — never
-/// by matching the secret's value, which fails on text stored with escaped or quoted bytes. If any
+/// detectable), scanned in one pass, and the scanner says which block each finding came from — never
+/// the secret's value, which fails on text stored with escaped or quoted bytes. If any
 /// chunk of a block is dirty, the whole block is held back (its other chunks carry the rest of the
 /// secret). Fail-closed on the scanner — a push must scan before it uploads.
 fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {

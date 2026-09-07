@@ -1,8 +1,8 @@
 //! Secret scanning and redaction, behind the [`SecretScanner`] trait so the detection engine is
-//! pluggable. Built on it: [`scan_blocks`] (locate findings per text by line, in one pass),
-//! [`excise`] (redact matched values from a text), and [`summary`]/[`detectors`] for user-facing
-//! messages. Everything operates on plain text and [`Finding`]s; the module depends on no other
-//! funes module.
+//! pluggable. Built on it: [`scan_blocks`] (scan every block in one pass and report what was found
+//! in each), [`excise`] (redact matched values from a text), and [`summary`]/[`detectors`] for
+//! user-facing messages. Everything operates on plain text and [`Finding`]s; the module depends on
+//! no other funes module.
 //!
 //! funes ships one scanner, [`Trufflehog`]. Discovery is via `$FUNES_TRUFFLEHOG`, then `$PATH`,
 //! then common install dirs — funes runs as an IDE-spawned MCP server, whose `$PATH` is often
@@ -27,10 +27,9 @@ const PLAIN: &str = "PLAIN";
 ///
 /// - `raw` is the matched value in the scanner's *canonical* form (real newlines, surrounding
 ///   quotes/escapes stripped). [`excise`] redacts by byte-matching it (or its JSON-escaped form)
-///   against the stored text; for *locating* a finding it's unreliable — an escaped or quoted key
-///   won't match verbatim — so location goes by `line`, not `raw`.
-/// - `line` is the 1-based line in the scanned blob where the match begins. This is robust to
-///   escaping, so it — not `raw` — is what [`scan_blocks`] uses to attribute a finding to its source.
+///   against the stored text. It says nothing about *where* the match is — an escaped or quoted key
+///   won't match verbatim.
+/// - `line` is the line trufflehog reported, counted in its own decoded output. Nothing reads it.
 /// - `decoder` is the decoder trufflehog used to uncover the match (`PLAIN`, `BASE64`, …). `PLAIN`
 ///   means the secret bytes are in the text directly (possibly string-escaped); anything else means
 ///   it was inside an encoded region [`excise`] won't reconstruct, so that block is dropped, not redacted.
@@ -65,12 +64,18 @@ impl Trufflehog {
 }
 
 impl SecretScanner for Trufflehog {
+    /// One file per text, one run over the directory: trufflehog names the file each secret came
+    /// from. One file for all of them would leave only the reported line to tell them apart, and
+    /// that line is counted in the decoder's output, not in the text funes holds.
     fn scan(&self, texts: &[&str]) -> Result<Vec<Vec<Finding>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
         let dir = tempfile::tempdir().context("creating a temp dir for the secret scan")?;
-        std::fs::write(dir.path().join("blob.txt"), texts.join("\n")).context("staging text for the scan")?;
+        for (i, text) in texts.iter().enumerate() {
+            std::fs::write(dir.path().join(i.to_string()), text)
+                .with_context(|| format!("staging text {i} for the scan"))?;
+        }
         let out = Command::new(&self.bin)
             .arg("filesystem")
             .arg(dir.path())
@@ -85,72 +90,34 @@ impl SecretScanner for Trufflehog {
             .output()
             .with_context(|| format!("running trufflehog at {}", self.bin.display()))?;
 
-        let findings = interpret_scan_output(out.status.code(), &out.stdout, &out.stderr)?;
-        group_by_line(texts, findings)
+        let records = interpret_scan_output(out.status.code(), &out.stdout, &out.stderr)?;
+        group_by_file(records, texts.len())
     }
 }
 
-/// Which text each secret came from, read off the line trufflehog reported: the text whose lines in
-/// the joined blob cover that line. A secret reported with no line falls back to a search for its
-/// value. Fail-closed when neither works — a secret no text owns can be neither redacted nor held
-/// back.
-fn group_by_line(texts: &[&str], findings: Vec<Finding>) -> Result<Vec<Vec<Finding>>> {
-    let mut out: Vec<Vec<Finding>> = (0..texts.len()).map(|_| Vec::new()).collect();
-    if findings.is_empty() {
-        return Ok(out);
-    }
-
-    // Line span [start, end) of each text in the joined blob (1-based). `join("\n")` puts one
-    // newline between texts, so text i+1 begins on the line right after text i ends.
-    let mut spans = Vec::with_capacity(texts.len());
-    let mut cursor = 1usize;
-    for t in texts {
-        let lines = t.split('\n').count().max(1);
-        spans.push((cursor, cursor + lines));
-        cursor += lines;
-    }
-
-    for (finding, f) in findings.into_iter().enumerate() {
-        match f.line {
-            // Primary: map the reported line to the text whose span contains it.
-            Some(line) => {
-                let i = spans.iter().position(|&(s, e)| line >= s && line < e).ok_or_else(|| {
-                    anyhow!(
-                        "secret-scanner finding {} reports line {line} outside the scanned text; refusing to continue",
-                        finding + 1
-                    )
-                })?;
-                out[i].push(f);
-            }
-            // Fall back to raw containment when the scanner has no line information.
-            None => {
-                let needle = f.raw.trim().to_string();
-                if needle.is_empty() {
-                    bail!(
-                        "secret-scanner finding {} has neither a line nor a usable match; refusing to continue",
-                        finding + 1
-                    );
-                }
-                let mut mapped = false;
-                for (i, t) in texts.iter().enumerate() {
-                    if t.contains(&needle) {
-                        out[i].push(f.clone());
-                        mapped = true;
-                    }
-                }
-                if !mapped {
-                    bail!(
-                        "secret-scanner finding {} could not be attributed to scanned text; refusing to continue",
-                        finding + 1
-                    );
-                }
-            }
-        }
+/// Which text each secret came from, read off the file trufflehog reported: each text is staged
+/// under its own index. Fail-closed on a file that is not one of them — a secret no text owns can
+/// be neither redacted nor held back.
+fn group_by_file(records: Vec<(String, Finding)>, texts: usize) -> Result<Vec<Vec<Finding>>> {
+    let mut out: Vec<Vec<Finding>> = (0..texts).map(|_| Vec::new()).collect();
+    for (file, finding) in records {
+        let name = Path::new(&file)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let i = name.parse::<usize>().ok().filter(|&i| i < texts).ok_or_else(|| {
+            anyhow!(
+                "trufflehog reported a {} finding in {name:?}, which is not one of the {texts} \
+                     staged text(s); refusing to treat the text as clean",
+                finding.detector
+            )
+        })?;
+        out[i].push(finding);
     }
     Ok(out)
 }
 
-fn interpret_scan_output(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Vec<Finding>> {
+fn interpret_scan_output(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<Vec<(String, Finding)>> {
     match status {
         Some(0) if stdout.iter().all(u8::is_ascii_whitespace) => Ok(Vec::new()),
         Some(0) => bail!(
@@ -164,7 +131,7 @@ fn interpret_scan_output(status: Option<i32>, stdout: &[u8], stderr: &[u8]) -> R
     }
 }
 
-fn parse_findings(stdout: &[u8]) -> Result<Vec<Finding>> {
+fn parse_findings(stdout: &[u8]) -> Result<Vec<(String, Finding)>> {
     let text = std::str::from_utf8(stdout).map_err(|e| {
         anyhow!(
             "trufflehog emitted non-UTF-8 result data near byte {}; refusing to treat the text as clean",
@@ -186,8 +153,8 @@ fn parse_findings(stdout: &[u8]) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-/// Parse one trufflehog JSON result line into a [`Finding`].
-fn parse_finding(line: &str) -> Result<Finding> {
+/// Parse one trufflehog JSON result line into the file it was found in and the [`Finding`] itself.
+fn parse_finding(line: &str) -> Result<(String, Finding)> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).context("invalid JSON result record")?;
     let required_string = |field: &str| -> Result<String> {
         v.get(field)
@@ -199,6 +166,11 @@ fn parse_finding(line: &str) -> Result<Finding> {
     if detector.is_empty() {
         bail!("empty DetectorName");
     }
+    let file = v
+        .pointer("/SourceMetadata/Data/Filesystem/file")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow!("missing or non-string SourceMetadata.Data.Filesystem.file"))?
+        .to_string();
     let line = v
         .pointer("/SourceMetadata/Data/Filesystem/line")
         .and_then(|x| x.as_u64())
@@ -211,12 +183,15 @@ fn parse_finding(line: &str) -> Result<Finding> {
     if decoder.is_empty() {
         bail!("empty DecoderName");
     }
-    Ok(Finding {
-        detector,
-        raw: required_string("Raw")?,
-        line: Some(line),
-        decoder,
-    })
+    Ok((
+        file,
+        Finding {
+            detector,
+            raw: required_string("Raw")?,
+            line: Some(line),
+            decoder,
+        },
+    ))
 }
 
 /// Candidate order for the trufflehog binary: `$FUNES_TRUFFLEHOG` → `$PATH` entries → common
@@ -386,15 +361,6 @@ mod tests {
         }
     }
 
-    fn finding_at(detector: &str, line: usize) -> Finding {
-        Finding {
-            detector: detector.to_string(),
-            raw: String::new(),
-            line: Some(line),
-            decoder: "PLAIN".into(),
-        }
-    }
-
     #[test]
     fn discovery_precedence() {
         // $FUNES_TRUFFLEHOG wins outright, even with a PATH set.
@@ -449,16 +415,6 @@ mod tests {
         let err = interpret_scan_output(Some(FOUND), output, b"").unwrap_err().to_string();
         assert!(err.contains("record 1"), "{err}");
         assert!(!err.contains("DO_NOT_ECHO"), "scanner output leaked in error: {err}");
-    }
-
-    /// Detectors located in each text — the view `scan_blocks` callers derive for "which texts are
-    /// dirty, with what".
-    fn detectors_by_line(texts: &[&str], findings: Vec<Finding>) -> Vec<Vec<String>> {
-        group_by_line(texts, findings)
-            .unwrap()
-            .iter()
-            .map(|fs| detectors(fs))
-            .collect()
     }
 
     #[test]
@@ -531,52 +487,25 @@ mod tests {
     }
 
     #[test]
-    fn group_by_line_finds_the_text_a_secret_is_in() {
-        // Two single-line texts then a 3-line one. A finding on line 4 (the second line of text 2)
-        // must be attributed to text 2 — by line range, never by `raw`.
-        let hits = detectors_by_line(&["alpha", "beta", "k1\nk2\nk3"], vec![finding_at("PrivateKey", 4)]);
-        assert_eq!(hits[0], Vec::<String>::new());
-        assert_eq!(hits[1], Vec::<String>::new());
-        assert_eq!(hits[2], vec!["PrivateKey".to_string()]);
+    fn group_by_file_finds_the_text_a_secret_is_in() {
+        let records = vec![
+            ("/tmp/x/2".to_string(), finding("AWS", "SEKRET")),
+            ("/tmp/x/0".to_string(), finding("PrivateKey", "KEY")),
+        ];
+        let out = group_by_file(records, 3).unwrap();
+        assert_eq!(detectors(&out[0]), vec!["PrivateKey".to_string()]);
+        assert!(out[1].is_empty());
+        assert_eq!(detectors(&out[2]), vec!["AWS".to_string()]);
     }
 
     #[test]
-    fn group_by_line_does_not_use_raw_so_escaping_cannot_hide_a_secret() {
-        // The regression that leaked: `raw` (real newlines) is NOT a substring of the stored text
-        // (escaped `\n`). Value-matching misses it; the reported line number does not.
-        let escaped = "[tool_result] key: -----BEGIN-----\\nABC\\n-----END-----";
-        let finding = Finding {
-            detector: "PrivateKey".to_string(),
-            raw: "-----BEGIN-----\nABC\n-----END-----".to_string(), // real newlines: not in `escaped`
-            line: Some(2),
-            decoder: "PLAIN".to_string(),
-        };
-        let hits = detectors_by_line(&["clean chatter", escaped, "more chatter"], vec![finding]);
-        assert_eq!(
-            hits[1],
-            vec!["PrivateKey".to_string()],
-            "escaped secret must still be located"
-        );
-        assert!(hits[0].is_empty() && hits[2].is_empty());
-    }
-
-    #[test]
-    fn group_by_line_falls_back_to_raw_when_a_finding_has_no_line() {
-        // A scanner that reports no line still flags via `raw` containment rather than passing.
-        let hits = detectors_by_line(
-            &["nothing here", "contains SEKRET inline"],
-            vec![finding("AWS", "SEKRET")],
-        );
-        assert!(hits[0].is_empty());
-        assert_eq!(hits[1], vec!["AWS".to_string()]);
-    }
-
-    #[test]
-    fn group_by_line_rejects_a_finding_it_cannot_place() {
-        let err = group_by_line(&["only one line"], vec![finding_at("PrivateKey", 99)])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("outside the scanned text"), "{err}");
+    fn group_by_file_rejects_a_file_that_is_not_one_of_the_staged_texts() {
+        for file in ["/tmp/x/blob.txt", "/tmp/x/9", "/tmp/x/1/inner.txt"] {
+            let err = group_by_file(vec![(file.to_string(), finding("AWS", "SEKRET"))], 2)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not one of the 2 staged text(s)"), "{file}: {err}");
+        }
     }
 
     #[test]
@@ -604,24 +533,54 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
-        let key = dir.path().join("id_ed25519");
-        // A throwaway key generated at test time — never committed, so funes ships no secret.
-        let made = Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-N", "", "-q", "-f"])
-            .arg(&key)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !made {
+        let Some(key) = throwaway_key(dir.path(), "id_ed25519") else {
             eprintln!("skip: ssh-keygen unavailable");
             return;
-        }
-        let blob = std::fs::read_to_string(&key).unwrap();
-        let found = scanner.scan(&[blob.as_str()]).expect("scan");
+        };
+        let found = scanner.scan(&[key.as_str()]).expect("scan");
         assert!(
             found[0].iter().any(|f| f.detector == "PrivateKey"),
             "expected a PrivateKey finding, got {:?}",
             detectors(&found[0])
         );
+    }
+
+    #[test]
+    fn each_secret_is_found_in_the_text_that_holds_it() {
+        let Ok(scanner) = Trufflehog::find() else {
+            eprintln!("skip: trufflehog not found");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (Some(a), Some(b)) = (throwaway_key(dir.path(), "a"), throwaway_key(dir.path(), "b")) else {
+            eprintln!("skip: ssh-keygen unavailable");
+            return;
+        };
+        // Escaped newlines: each key is found through a decoder, which counts lines in its own output.
+        let stored = |k: &str| format!("tool_result: {{\"key\":\"{}\"}}", k.replace('\n', "&#xa;"));
+        let (first, second) = (stored(&a), stored(&b));
+        let texts = [
+            "user: the deploy failed, can you look?",
+            first.as_str(),
+            "assistant: nothing obvious in there.",
+            second.as_str(),
+            "assistant: found it, fixed.",
+        ];
+        let found = scanner.scan(&texts).expect("scan");
+        let holding: Vec<usize> = (0..texts.len()).filter(|&i| !found[i].is_empty()).collect();
+        assert_eq!(holding, vec![1, 3], "each key must be found in its own text");
+    }
+
+    /// A throwaway ed25519 key generated at test time — never committed, so funes ships no secret.
+    /// `None` when ssh-keygen isn't available.
+    fn throwaway_key(dir: &Path, name: &str) -> Option<String> {
+        let path = dir.join(name);
+        let made = Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-q", "-f"])
+            .arg(&path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        made.then(|| std::fs::read_to_string(&path).unwrap())
     }
 }
