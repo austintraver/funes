@@ -29,7 +29,6 @@ const PLAIN: &str = "PLAIN";
 ///   quotes/escapes stripped). [`excise`] redacts by byte-matching it (or its JSON-escaped form)
 ///   against the stored text. It says nothing about *where* the match is — an escaped or quoted key
 ///   won't match verbatim.
-/// - `line` is the line trufflehog reported, counted in its own decoded output. Nothing reads it.
 /// - `decoder` is the decoder trufflehog used to uncover the match (`PLAIN`, `BASE64`, …). `PLAIN`
 ///   means the secret bytes are in the text directly (possibly string-escaped); anything else means
 ///   it was inside an encoded region [`excise`] won't reconstruct, so that block is dropped, not redacted.
@@ -37,7 +36,6 @@ const PLAIN: &str = "PLAIN";
 pub struct Finding {
     pub detector: String,
     pub raw: String,
-    pub line: Option<usize>,
     pub decoder: String,
 }
 
@@ -171,14 +169,6 @@ fn parse_finding(line: &str) -> Result<(String, Finding)> {
         .and_then(|x| x.as_str())
         .ok_or_else(|| anyhow!("missing or non-string SourceMetadata.Data.Filesystem.file"))?
         .to_string();
-    let line = v
-        .pointer("/SourceMetadata/Data/Filesystem/line")
-        .and_then(|x| x.as_u64())
-        .ok_or_else(|| anyhow!("missing or invalid SourceMetadata.Data.Filesystem.line"))?;
-    let line = usize::try_from(line).context("filesystem line does not fit this platform")?;
-    if line == 0 {
-        bail!("filesystem line must be 1-based");
-    }
     let decoder = required_string("DecoderName")?;
     if decoder.is_empty() {
         bail!("empty DecoderName");
@@ -188,7 +178,6 @@ fn parse_finding(line: &str) -> Result<(String, Finding)> {
         Finding {
             detector,
             raw: required_string("Raw")?,
-            line: Some(line),
             decoder,
         },
     ))
@@ -356,7 +345,6 @@ mod tests {
         Finding {
             detector: detector.to_string(),
             raw: raw.to_string(),
-            line: None,
             decoder: "PLAIN".into(),
         }
     }
@@ -460,7 +448,6 @@ mod tests {
         let finding = Finding {
             detector: "PrivateKey".into(),
             raw: "-----BEGIN-----\nABC\n-----END-----".into(), // real newlines
-            line: Some(1),
             decoder: "PLAIN".into(),
         };
         let r = excise(stored, &[finding]);
@@ -477,7 +464,6 @@ mod tests {
         let finding = Finding {
             detector: "Generic".into(),
             raw: "SEKRET".into(),
-            line: Some(1),
             decoder: "BASE64".into(),
         };
         let r = excise(stored, &[finding]);

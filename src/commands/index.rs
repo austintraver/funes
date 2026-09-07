@@ -1157,13 +1157,11 @@ mod tests {
             scan::Finding {
                 detector: "PrivateKey".into(),
                 raw: "TOPSECRET".into(),
-                line: None,
                 decoder: "PLAIN".into(),
             },
             scan::Finding {
                 detector: "VirusTotal".into(),
                 raw: "cafef00d".into(),
-                line: None,
                 decoder: "PLAIN".into(),
             },
         ]);
@@ -1199,7 +1197,6 @@ mod tests {
                 let hit = scan::Finding {
                     detector: "PrivateKey".into(),
                     raw: "SECRET".into(),
-                    line: None,
                     decoder: "PLAIN".into(),
                 };
                 Ok(texts.iter().map(|_| vec![hit.clone()]).collect())
