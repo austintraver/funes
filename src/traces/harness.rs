@@ -15,6 +15,7 @@ pub enum Harness {
     Pi,
     Hermes,
     Copilot,
+    Vscode,
 }
 
 /// Session-dir tails funes recognizes, each with its harness. Order also fixes the no-arg scan
@@ -35,6 +36,7 @@ impl Harness {
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
             Harness::Copilot => "copilot",
+            Harness::Vscode => "vscode",
         }
     }
 
@@ -48,6 +50,7 @@ impl Harness {
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
             Harness::Copilot => "copilot",
+            Harness::Vscode => "vscode",
         }
     }
 
@@ -59,8 +62,9 @@ impl Harness {
             "pi" => Ok(Harness::Pi),
             "hermes" => Ok(Harness::Hermes),
             "copilot" => Ok(Harness::Copilot),
+            "vscode" => Ok(Harness::Vscode),
             other => Err(anyhow!(
-                "unknown harness {other:?} (expected claude, codex, pi, hermes, or copilot)"
+                "unknown harness {other:?} (expected claude, codex, pi, hermes, copilot, or vscode)"
             )),
         }
     }

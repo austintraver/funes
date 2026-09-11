@@ -42,6 +42,26 @@ excludes streaming deltas, encrypted reasoning, diagnostic logs, and the separat
 search index. Event IDs provide stable provenance; working-directory context comes from the
 events or `workspace.yaml`. Run indexing explicitly; this support does not install client hooks.
 
+### VS Code chat transcripts
+
+Use `funes index <path> --harness vscode` for native VS Code chat sessions. Paths can name a
+version-3 JSON snapshot, a JSONL mutation log, a `chatSessions` directory, workspace storage,
+or a VS Code user-data/profile root. A sibling JSONL log takes precedence over an older JSON
+snapshot. Other session versions and malformed mutation logs are reported and retried on the
+next run; patch records cannot safely be skipped.
+
+The importer replays the log before extracting terminal request/response pairs. Pending and
+input-waiting responses are deferred; completed, cancelled, and failed responses retain their
+persisted content. Native request and response IDs keep retries and repeated imports stable.
+Tool details are limited to what VS Code saved; its chat storage does not retain every original
+tool argument. Encrypted or binary content is not decoded.
+
+Working-directory metadata comes from the session or its containing workspace's recorded folder.
+A multi-root workspace without a recorded working directory has no inferred repository. Existing
+memory remains append-only: deleting or editing a transcript does not remove previously indexed
+passages. A new native response ID adds a new response; same-ID rewrites retain existing Funes
+semantics. No client installation or indexing hooks are added.
+
 ### Parquet trace format
 
 Parquet import targets the Hugging Face agent-traces layout: **one row per session**, with these two
@@ -116,7 +136,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes \| copilot`. |
+| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes \| copilot \| vscode`. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
