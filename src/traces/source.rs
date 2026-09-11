@@ -95,6 +95,9 @@ pub fn open_with_harness(path: &Path, limit: Option<usize>, harness: Option<Harn
         })
     } else {
         let harness = harness.unwrap_or_else(|| detect_harness(path));
+        if harness == Harness::Vscode {
+            return Box::new(super::vscode_source::VscodeSource::new(path.to_path_buf(), limit));
+        }
         if harness == Harness::Copilot {
             return Box::new(super::copilot::CopilotSource::new(path.to_path_buf(), limit));
         }
@@ -220,6 +223,7 @@ impl TraceSource for JsonlTree {
             Harness::Pi => pi::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
+            Harness::Vscode => anyhow::bail!("VS Code sessions are read by their dedicated source"),
             Harness::Copilot => anyhow::bail!("copilot sessions are read from events.jsonl by their dedicated source"),
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };

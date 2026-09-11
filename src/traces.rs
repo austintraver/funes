@@ -15,6 +15,8 @@ pub mod parquet;
 pub mod pi;
 pub mod repo;
 pub mod source;
+pub mod vscode;
+pub mod vscode_source;
 
 pub struct Block {
     pub block_type: String, // "text" | "thinking" | "tool_use" | "tool_result"
@@ -33,6 +35,6 @@ pub struct Turn {
     pub role: String,
     pub blocks: Vec<Block>,
     pub source_path: String,
-    /// Which coding agent produced this session: `claude_code` | `codex` | `pi` | `hermes` | `copilot`.
+    /// Which coding agent produced this session: `claude_code` | `codex` | `pi` | `hermes` | `copilot` | `vscode`.
     pub harness: String,
 }

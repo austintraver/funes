@@ -68,7 +68,8 @@ shows which agent it came from). Another agent can join through a compatible `.p
 export; [the import contract](docs/index.md#parquet-trace-format) defines the required schema.
 
 Copilot CLI transcript ingestion is available through `funes index --harness copilot`.
-Client installation and hooks for Copilot are separate from transcript support.
+VS Code version-3 chat files are available through `funes index <path> --harness vscode`.
+Client installation and hooks for these clients are separate from transcript support.
 
 Models work the same way. funes runs pinned local embedding and reranking models, but no generative
 model of its own: you reason with whatever your agent uses — through **pi**, any local model or one
