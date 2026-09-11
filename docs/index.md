@@ -11,7 +11,7 @@ funes index      # a fast, text-first pass over every known harness dir, into on
 ## What it indexes
 
 With **no argument**, in a terminal, `funes index` sweeps every supported agent's session dir it
-finds — `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`, `~/.hermes/state.db` — into
+finds — `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`, `~/.hermes/state.db`, `~/.copilot/session-state` — into
 one memory, then offers to finish any deeper work left. Scope it to a single agent with `--harness`:
 
 ```bash
@@ -29,6 +29,18 @@ funes index <org>/<repo>                   # a Hub trace dataset (or a full hf:/
 An existing local path always wins over reading the same string as a repo ref. An **automated
 (non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
 harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
+
+### Copilot CLI sessions
+
+`funes index --harness copilot` reads `session-state/<id>/events.jsonl` under
+`COPILOT_HOME` (default `~/.copilot`). An explicit path can name the session-state directory,
+one session directory, or its `events.jsonl`. SDK and IDE-hosted CLI sessions using this
+format are imported the same way.
+
+The importer keeps durable messages, readable reasoning, tool calls, and tool results. It
+excludes streaming deltas, encrypted reasoning, diagnostic logs, and the separate SQLite
+search index. Event IDs provide stable provenance; working-directory context comes from the
+events or `workspace.yaml`. Run indexing explicitly; this support does not install client hooks.
 
 ### Parquet trace format
 
@@ -104,7 +116,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes`. |
+| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes \| copilot`. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
@@ -114,7 +126,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db   (or a .parquet trace)
+~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db, ~/.copilot/session-state   (or a .parquet trace)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)
