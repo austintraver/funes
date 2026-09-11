@@ -11,7 +11,7 @@ funes index      # a fast, text-first pass over every known harness dir, into on
 ## What it indexes
 
 With **no argument**, in a terminal, `funes index` sweeps every supported agent's session dir it
-finds — `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`, `~/.hermes/state.db`, `~/.copilot/session-state` — into
+finds — `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions`, `~/.hermes/state.db`, `~/.copilot/session-state`, and standard VS Code user-data roots — into
 one memory, then offers to finish any deeper work left. Scope it to a single agent with `--harness`:
 
 ```bash
@@ -44,7 +44,18 @@ events or `workspace.yaml`. Run indexing explicitly; this support does not insta
 
 ### VS Code chat transcripts
 
-Use `funes index <path> --harness vscode` for native VS Code chat sessions. Paths can name a
+`funes index --harness vscode` scans both Stable and Insiders installations. Default user-data
+roots are `~/Library/Application Support/Code{, - Insiders}` on macOS,
+`$APPDATA/Code{, - Insiders}` on Windows, and `$XDG_CONFIG_HOME/Code{, - Insiders}` on Linux
+(with `~/.config` as the Linux fallback). Only existing roots are visited. Under `User`, discovery
+includes `workspaceStorage/<id>/chatSessions` and `globalStorage/emptyWindowChatSessions`,
+including profile-specific stores under `profiles/<id>`. Transfer staging, diagnostic logs,
+and SQLite indexes are excluded.
+
+Use `funes index <path> --harness vscode` for portable installations, custom user-data roots,
+profiles, and copied remote-host sessions. Other machines are never traversed automatically.
+External Copilot CLI sessions remain owned by the Copilot source; matching workspace paths
+do not merge conversations. Paths can name a
 version-3 JSON snapshot, a JSONL mutation log, a `chatSessions` directory, workspace storage,
 or a VS Code user-data/profile root. A sibling JSONL log takes precedence over an older JSON
 snapshot. Other session versions and malformed mutation logs are reported and retried on the
@@ -136,7 +147,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 
 | Flag | Meaning |
 | --- | --- |
-| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's dir: `claude \| codex \| pi \| hermes \| copilot \| vscode`. |
+| `--harness <name>` | Override auto-detection for a path, or (with no path) target one harness's roots: `claude \| codex \| pi \| hermes \| copilot \| vscode`. |
 | `--limit <N>` | Index only the most recent N sessions per source. Omit to index all. A Hub repo ignores it and indexes every shard. |
 | `--no-thinking` | Exclude thinking blocks. |
 | `--yes` | Don't ask: a budgeted (no-path) run finishes all remaining work; an explicit path skips the first-index size confirmation. |
@@ -146,7 +157,7 @@ scanned or stored: a pasted screenshot is megabytes of base64 with nothing recal
 Indexing and recall are one deterministic pipeline:
 
 ```
-~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db, ~/.copilot/session-state   (or a .parquet trace)
+~/.claude/projects, ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db, ~/.copilot/session-state, VS Code chat stores   (or a .parquet trace)
    │  parse        deterministic — turns (text / thinking / tool_use / tool_result), tagged by agent
    │  chunk        one chunk per content block, tight provenance
    │  embed        pinned local model (BAAI/bge-small-en-v1.5)

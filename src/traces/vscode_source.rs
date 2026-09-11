@@ -233,7 +233,7 @@ fn discover(root: &Path) -> Result<Vec<PathBuf>> {
             "chatSessions" | "emptyWindowChatSessions" => add_session_dir(root, &mut out)?,
             "workspaceStorage" => scan_workspace_storage(root, &mut out)?,
             "globalStorage" => add_session_dir(&root.join("emptyWindowChatSessions"), &mut out)?,
-            "User" | "user-data" => scan_profile_root(root, &mut out)?,
+            "User" => scan_profile_root(root, &mut out)?,
             _ => {
                 scan_profile_root(&root.join("User"), &mut out)?;
                 scan_profile_root(&root.join("user-data"), &mut out)?;
@@ -268,7 +268,7 @@ fn owns_lexical(root: &Path, key: &Path) -> bool {
         "chatSessions" | "emptyWindowChatSessions" => dirs.is_empty(),
         "workspaceStorage" => dirs.len() == 2 && dirs[1] == "chatSessions",
         "globalStorage" => dirs == ["emptyWindowChatSessions"],
-        "User" | "user-data" => recognized_user_dirs(dirs),
+        "User" => recognized_user_dirs(dirs),
         _ => {
             recognized_user_dirs(dirs)
                 || (dirs.first().is_some_and(|p| *p == "User" || *p == "user-data") && recognized_user_dirs(&dirs[1..]))
@@ -359,5 +359,86 @@ mod tests {
         let unit = src.units().unwrap().pop().unwrap();
         TraceSource::read(&src, &unit).unwrap();
         assert_eq!(TraceSource::cwd(&src, &unit).as_deref(), Some("/tmp/project"));
+    }
+    #[test]
+    fn platform_roots_and_environment_overrides() {
+        let home = tempdir().unwrap();
+        let config = tempdir().unwrap();
+        for name in ["Code", "Code - Insiders"] {
+            std::fs::create_dir_all(home.path().join("Library/Application Support").join(name)).unwrap();
+            std::fs::create_dir_all(config.path().join(name)).unwrap();
+        }
+        assert_eq!(user_data_roots(home.path(), "macos", None, None).len(), 2);
+        assert_eq!(
+            user_data_roots(home.path(), "windows", Some(config.path()), None).len(),
+            2
+        );
+        assert!(user_data_roots(home.path(), "windows", None, None).is_empty());
+        assert_eq!(
+            user_data_roots(home.path(), "linux", None, Some(config.path())).len(),
+            2
+        );
+        assert!(user_data_roots(home.path(), "linux", None, None).is_empty());
+    }
+
+    #[test]
+    fn profiles_limits_metadata_and_retired_keys() {
+        let home = tempdir().unwrap();
+        let root = home.path().join("user-data");
+        let paths = [
+            "User/workspaceStorage/project/chatSessions/workspace.jsonl",
+            "User/globalStorage/emptyWindowChatSessions/default.json",
+            "User/profiles/p1/globalStorage/emptyWindowChatSessions/profile.json",
+        ];
+        for path in paths {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}").unwrap();
+        }
+        for path in [
+            "User/globalStorage/chatSessionTransfer/data.json",
+            "logs/debug.jsonl",
+            "User/profiles/p1/settings.json",
+            "User/workspaceStorage/project/state.vscdb",
+        ] {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}").unwrap();
+        }
+        let source = VscodeSource::new(root.clone(), Some(1));
+        let keys = source.unit_keys().unwrap();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(source.units().unwrap().len(), 1);
+        for key in &keys {
+            assert!(source.owns(key));
+        }
+        let session = root.join(paths[0]);
+        let before = VscodeSource::signature(&session);
+        std::fs::write(
+            session.parent().unwrap().parent().unwrap().join("workspace.json"),
+            r#"{"folder":"file:///work/project"}"#,
+        )
+        .unwrap();
+        assert_ne!(before, VscodeSource::signature(&session));
+        // A removed source key remains owned so coverage can account for it. Memory deletion is
+        // never requested by source discovery.
+        let removed = &keys[0];
+        std::fs::rename(removed, home.path().join("outside-store")).unwrap();
+        assert!(source.owns(removed));
+        assert_eq!(source.unit_keys().unwrap().len(), 2);
+        assert!(!source.owns(root.join("User/settings.json").to_str().unwrap()));
+    }
+
+    #[test]
+    fn preferred_jsonl_errors_do_not_fall_back_to_stale_json() {
+        let dir = tempdir().unwrap();
+        let json = dir.path().join("session.json");
+        std::fs::write(&json, r#"{"version":3,"requests":[]}"#).unwrap();
+        let jsonl = json.with_extension("jsonl");
+        std::fs::write(&jsonl, "{broken").unwrap();
+        let source = VscodeSource::new(json, None);
+        let unit = source.units().unwrap().pop().unwrap();
+        assert_eq!(Path::new(&unit.key), canonical(jsonl));
+        assert!(source.read(&unit).is_err());
     }
 }
