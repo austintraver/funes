@@ -41,7 +41,7 @@ impl Harness {
     }
 
     /// The `--harness` spelling `index` accepts and shows in `--help`
-    /// (`claude`/`codex`/`pi`/`hermes`). Differs from [`Harness::as_str`], the stored facet, only
+    /// (`claude`/`codex`/`pi`/`hermes`/`copilot`/`vscode`). Differs from [`Harness::as_str`], the stored facet, only
     /// for Claude (facet `claude_code`).
     pub fn cli_name(&self) -> &'static str {
         match self {
@@ -54,7 +54,7 @@ impl Harness {
         }
     }
 
-    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `pi`, or `hermes`.
+    /// Parse the CLI harness spelling, accepting `claude_code` as an alias for `claude`.
     pub fn parse(s: &str) -> Result<Harness> {
         match s {
             "claude" | "claude_code" => Ok(Harness::Claude),
@@ -135,16 +135,27 @@ fn known_harness_roots_from(
 /// The `(root, harness)` pairs present under `$HOME` — drives a no-arg `funes index`. The JSONL
 /// agents contribute a session dir each; hermes contributes its `state.db` file.
 pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
-    let home = match std::env::var_os("HOME") {
+    let home = match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         Some(h) => PathBuf::from(h),
         None => return Vec::new(),
     };
     let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from);
-    known_harness_roots_from(
+    let mut roots = known_harness_roots_from(
         &home,
         pi_agent_dir.as_deref(),
         std::env::var_os("COPILOT_HOME").as_deref().map(Path::new),
-    )
+    );
+    roots.extend(
+        super::vscode_source::user_data_roots(
+            &home,
+            std::env::consts::OS,
+            std::env::var_os("APPDATA").as_deref().map(Path::new),
+            std::env::var_os("XDG_CONFIG_HOME").as_deref().map(Path::new),
+        )
+        .into_iter()
+        .map(|root| (root, Harness::Vscode)),
+    );
+    roots
 }
 
 #[cfg(test)]
