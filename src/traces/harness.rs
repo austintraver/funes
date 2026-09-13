@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
-/// Transcript source. Selects the parser and the recorded `harness` facet.
+/// Which coding agent produced a transcript. Selects the parser and the recorded `harness` facet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
     Claude,
@@ -39,7 +39,7 @@ impl Harness {
     }
 
     /// The `--harness` spelling `index` accepts and shows in `--help`
-    /// (`claude`/`codex`/`pi`/`hermes`). Differs from [`Harness::as_str`], the stored facet, only
+    /// (`claude`/`codex`/`copilot`/`pi`/`hermes`). Differs from [`Harness::as_str`], the stored facet, only
     /// for Claude (facet `claude_code`).
     pub fn cli_name(&self) -> &'static str {
         match self {
@@ -51,7 +51,7 @@ impl Harness {
         }
     }
 
-    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `pi`, or `hermes`.
+    /// Parse a `--harness` override: `claude`/`claude_code`, `codex`, `copilot`, `pi`, or `hermes`.
     pub fn parse(s: &str) -> Result<Harness> {
         match s {
             "claude" | "claude_code" => Ok(Harness::Claude),

@@ -48,7 +48,7 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a transcript source: claude | codex | copilot | pi | hermes.
+        /// Restrict to a harness: claude | codex | copilot | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]
@@ -87,7 +87,7 @@ enum Cmd {
         /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
         /// run must name a target.
         path: Option<String>,
-        /// Select the transcript source for PATH: claude | codex | copilot | pi | hermes.
+        /// Override harness auto-detection for PATH: claude | codex | copilot | pi | hermes.
         #[arg(long)]
         harness: Option<String>,
         /// Exclude thinking blocks.
