@@ -48,7 +48,7 @@ enum Cmd {
         /// Restrict to a block type: text | thinking | tool_use | tool_result.
         #[arg(long = "type", value_name = "BLOCK_TYPE")]
         block_type: Option<String>,
-        /// Restrict to a harness: claude | codex | pi | hermes | copilot | vscode.
+        /// Restrict to a transcript source: claude | codex | copilot | pi | hermes | vscode.
         #[arg(long)]
         harness: Option<String>,
         #[command(flatten)]
@@ -87,7 +87,7 @@ enum Cmd {
         /// VS Code Stable/Insiders. `--harness <name>` alone targets all roots for one harness.
         /// An automated (non-terminal) run must name a target.
         path: Option<String>,
-        /// Override harness auto-detection for PATH: claude | codex | pi | hermes | copilot | vscode.
+        /// Select the transcript source for PATH: claude | codex | copilot | pi | hermes | vscode.
         #[arg(long)]
         harness: Option<String>,
         /// Exclude thinking blocks.
@@ -457,7 +457,7 @@ async fn main() -> Result<()> {
                 None => {
                     if !std::io::stdin().is_terminal() {
                         return Err(anyhow!(
-                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|pi|hermes|copilot|vscode>`; \
+                            "automated `funes index` needs a target — pass a path or `--harness <claude|codex|copilot|pi|hermes|vscode>`; \
                              refusing to index all harness roots unattended"
                         ));
                     }
@@ -472,7 +472,7 @@ async fn main() -> Result<()> {
                     Some(h) => println!("no {} sessions on this machine yet — nothing to index.", h.cli_name()),
                     None => println!(
                         "no sessions on this machine yet — nothing to index (looked in ~/.claude/projects, \
-                         ~/.codex/sessions, ~/.pi/agent/sessions, ~/.hermes/state.db, ~/.copilot/session-state, and standard VS Code user-data roots)."
+                         ~/.codex/sessions, ~/.copilot/session-state, ~/.pi/agent/sessions, ~/.hermes/state.db, and standard VS Code user-data roots)."
                     ),
                 }
                 return Ok(());
