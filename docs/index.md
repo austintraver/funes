@@ -18,7 +18,9 @@ one memory, then offers to finish any deeper work left. Scope it to a single age
 funes index --harness codex        # only ~/.codex/sessions
 ```
 
-Point it at a **path** to index one place in full — a transcript tree or a single `.parquet` trace
+Copilot honors `COPILOT_HOME` when set (default `~/.copilot`).
+
+Point it at a **path** to index one place in full — a transcript file or tree, or a `.parquet` trace
 export — or at a **Hub trace repo** to index its auto-converted parquet:
 
 ```bash
@@ -30,37 +32,8 @@ An existing local path always wins over reading the same string as a repo ref. A
 (non-terminal) run must name a target** — a path or `--harness <name>`; funes refuses to sweep every
 harness root unattended (a Claude session-end shouldn't pull in Codex or pi sessions).
 
-### Copilot CLI sessions
-
-`funes index --harness copilot` reads `session-state/<id>/events.jsonl` under
-`COPILOT_HOME` (default `~/.copilot`). An explicit path can name the session-state directory,
-one session directory, or its `events.jsonl`. SDK and IDE-hosted CLI sessions using this
-format are imported the same way.
-
-The importer keeps durable messages, readable reasoning, tool calls, and tool results. It
-excludes streaming deltas, encrypted reasoning, diagnostic logs, and the separate SQLite
-search index. Event IDs provide stable provenance; working-directory context comes from the
-events or `workspace.yaml`. Run indexing explicitly; this support does not install client hooks.
-
-### VS Code chat transcripts
-
-Use `funes index <path> --harness vscode` for native VS Code chat sessions. Paths can name a
-version-3 JSON snapshot, a JSONL mutation log, a `chatSessions` directory, workspace storage,
-or a VS Code user-data/profile root. A sibling JSONL log takes precedence over an older JSON
-snapshot. Other session versions and malformed mutation logs are reported and retried on the
-next run; patch records cannot safely be skipped.
-
-The importer replays the log before extracting terminal request/response pairs. Pending and
-input-waiting responses are deferred; completed, cancelled, and failed responses retain their
-persisted content. Native request and response IDs keep retries and repeated imports stable.
-Tool details are limited to what VS Code saved; its chat storage does not retain every original
-tool argument. Encrypted or binary content is not decoded.
-
-Working-directory metadata comes from the session or its containing workspace's recorded folder.
-A multi-root workspace without a recorded working directory has no inferred repository. Existing
-memory remains append-only: deleting or editing a transcript does not remove previously indexed
-passages. A new native response ID adds a new response; same-ID rewrites retain existing Funes
-semantics. No client installation or indexing hooks are added.
+VS Code accepts native version-3 `.json`/`.jsonl` chat files and chat-store directories with
+`funes index <path> --harness vscode`. Unfinished responses are indexed after they finish.
 
 ### Parquet trace format
 
