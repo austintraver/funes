@@ -75,14 +75,14 @@ funes index --harness hermes
 Reads the SQLite session store at `~/.hermes/state.db`. To use another store or a copied database,
 pass its `state.db` file or the directory containing it with `--harness hermes`.
 
-### VS Code workbench chat history
+### VS Code Local harness
 
 ```bash
 funes index --harness vscode
 ```
 
-Here, `vscode` identifies the saved chat format, not the agent runtime. Copilot `events.jsonl`
-files use `--harness copilot`, including those from sessions run through VS Code.
+Reads chat transcripts from VS Code’s built-in Local harness. For Copilot sessions in the
+editor or Agents window, use `--harness copilot`.
 
 Reads workspace and profile chats from the standard `Code` and `Code - Insiders` user-data
 roots under `~/Library/Application Support` on macOS, `$APPDATA` on Windows, or
