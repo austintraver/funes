@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
-/// Which coding agent produced a transcript. Selects the parser and the recorded `harness` facet.
+/// Transcript source. Selects the parser and the recorded `harness` facet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
     Claude,
@@ -64,7 +64,7 @@ impl Harness {
             "copilot" => Ok(Harness::Copilot),
             "vscode" => Ok(Harness::Vscode),
             other => Err(anyhow!(
-                "unknown harness {other:?} (expected claude, codex, pi, hermes, copilot, or vscode)"
+                "unknown harness {other:?} (expected claude, codex, copilot, pi, hermes, or vscode)"
             )),
         }
     }
