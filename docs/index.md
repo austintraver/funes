@@ -50,7 +50,8 @@ or directory. To include archived sessions, pass `~/.codex/archived_sessions` wi
 funes index --harness copilot
 ```
 
-Includes Copilot CLI sessions and local Copilot sessions from VS Code’s editor and Agents window.
+Includes local Copilot sessions from the CLI, GitHub Copilot desktop app, and VS Code’s editor
+and Agents window.
 
 Reads sessions under `~/.copilot/session-state`. An explicit path with `--harness copilot`
 can select the session-state directory, one session directory, or its `events.jsonl` file.
