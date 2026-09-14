@@ -69,7 +69,6 @@ export; [the import contract](docs/index.md#parquet-trace-format) defines the re
 
 `funes index --harness copilot` imports local Copilot sessions from the CLI, GitHub Copilot
 desktop app, and VS Code’s editor and Agents window.
-Client installation and hooks for Copilot are separate from transcript support.
 
 Models work the same way. funes runs pinned local embedding and reranking models, but no generative
 model of its own: you reason with whatever your agent uses — through **pi**, any local model or one
