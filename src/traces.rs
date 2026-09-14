@@ -28,8 +28,8 @@ pub struct Turn {
     pub workdir: String,
     /// Raw directory recorded for this turn, used when repository attribution needs resolving.
     pub recorded_cwd: Option<String>,
-    /// Repository identities in the stored facet format, recorded by the source or resolved locally.
-    pub repo: String,
+    /// Repository identities recorded by the source or resolved locally; absent when unknown.
+    pub repo: Option<String>,
     pub turn_uuid: String,
     pub parent_uuid: Option<String>,
     pub seq: i64,

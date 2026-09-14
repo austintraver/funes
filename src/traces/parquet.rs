@@ -233,7 +233,7 @@ fn turns_from_messages(
             source_path: source.to_string(),
             harness: harness.to_string(),
             recorded_cwd: None,
-            repo: String::new(),
+            repo: None,
         });
         parent = Some(turn_uuid);
         seq += 1;

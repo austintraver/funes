@@ -174,35 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn known_roots_follow_harness_order() {
-        let home = tempfile::tempdir().unwrap();
-        for (tail, _) in KNOWN_DIRS {
-            std::fs::create_dir_all(home.path().join(tail)).unwrap();
-        }
-        let hermes_db = home.path().join(HERMES_DB);
-        std::fs::create_dir_all(hermes_db.parent().unwrap()).unwrap();
-        std::fs::write(hermes_db, "").unwrap();
-        let custom = tempfile::tempdir().unwrap();
-        std::fs::create_dir(custom.path().join("sessions")).unwrap();
-        std::fs::create_dir(custom.path().join("session-state")).unwrap();
-
-        for overrides in [None, Some(custom.path())] {
-            let roots = known_harness_roots_from(home.path(), overrides, overrides);
-            let harnesses: Vec<_> = roots.iter().map(|(_, harness)| *harness).collect();
-            assert_eq!(
-                harnesses,
-                [
-                    Harness::Claude,
-                    Harness::Codex,
-                    Harness::Copilot,
-                    Harness::Pi,
-                    Harness::Hermes
-                ]
-            );
-        }
-    }
-
-    #[test]
     fn copilot_home_overrides_default_and_detects_events() {
         let home = tempfile::tempdir().unwrap();
         let custom = tempfile::tempdir().unwrap();

@@ -171,7 +171,7 @@ pub fn turns_from_jsonl_file(p: &Path, session_id: &str, fallback_workdir: &str)
             source_path: p.to_string_lossy().into_owned(),
             harness: "claude_code".into(),
             recorded_cwd: None,
-            repo: String::new(),
+            repo: None,
         });
         seq += 1;
     }

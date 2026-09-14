@@ -202,7 +202,7 @@ mod tests {
             source_path: String::new(),
             harness: "claude_code".into(),
             recorded_cwd: None,
-            repo: String::new(),
+            repo: None,
         };
         let mut turns = vec![
             turn("t0", vec![block("tool_use", Some("Bash"), "call_1")]),

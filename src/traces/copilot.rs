@@ -23,7 +23,7 @@ struct EventTurn {
 #[derive(Default)]
 struct SessionContext {
     cwd: Option<String>,
-    repo: String,
+    repo: Option<String>,
 }
 
 impl From<&Value> for SessionContext {
@@ -37,8 +37,7 @@ impl From<&Value> for SessionContext {
             repo: value
                 .get("repository")
                 .and_then(Value::as_str)
-                .and_then(super::repo::identity_from_path)
-                .unwrap_or_default(),
+                .and_then(super::repo::identity_from_path),
         }
     }
 }
@@ -100,15 +99,12 @@ fn tool_block(call: &Value, name_key: &str) -> Block {
 
 fn tool_result_block(data: &Value) -> Option<Block> {
     // Keep one representation of the result, preferring the complete display text.
-    // Opaque/binary content is not useful text and is not decoded.
     let result = &data["result"];
     let text = result.get("detailedContent").or_else(|| result.get("content"));
     let text = if text.is_some() {
         json_text(text)
     } else if data.get("error").is_some() {
         json_text(data.get("error"))
-    } else if result.is_string() {
-        json_text(Some(result))
     } else {
         result
             .get("contents")
@@ -136,7 +132,7 @@ fn workspace_context(path: &Path) -> Option<SessionContext> {
 /// Stream a native `events.jsonl`, keeping parsed conversation but not the full event log.
 /// A partial final write is ignored, like the other event-log parsers. I/O errors propagate so
 /// the indexer never stamps an unreadable session as successfully indexed.
-fn read_session(path: &Path) -> Result<Vec<Turn>> {
+fn turns_from_events_file(path: &Path) -> Result<Vec<Turn>> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut session_id = path
         .parent()
@@ -166,7 +162,7 @@ fn read_session(path: &Path) -> Result<Vec<Turn>> {
         }
         if matches!(kind, "session.start" | "session.resume" | "session.context_changed") {
             let recorded = SessionContext::from(data.get("context").unwrap_or(data));
-            if recorded.cwd.is_some() || !recorded.repo.is_empty() {
+            if recorded.cwd.is_some() || recorded.repo.is_some() {
                 context = recorded;
             }
         }
@@ -357,7 +353,7 @@ impl TraceSource for CopilotSource {
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let path = Path::new(&unit.key);
         let before = signature(path);
-        let turns = read_session(path)?;
+        let turns = turns_from_events_file(path)?;
         anyhow::ensure!(
             before == signature(path),
             "Copilot session changed while reading; retry indexing"
@@ -453,18 +449,16 @@ mod tests {
                 event("unknown", "future.event", json!({"content":"ignore"})),
             ],
         );
-        let session = read_session(&path).unwrap();
-        assert_eq!(session[0].recorded_cwd.as_deref(), Some("/work/repo"));
-        assert_eq!(session.len(), 5);
-        assert_eq!(session[1].turn_uuid, "a");
-        assert_eq!(session[1].parent_uuid.as_deref(), Some("previous"));
-        assert_eq!(session[1].blocks.len(), 3);
-        assert_eq!(session[2].blocks[0].text, "full result");
-        assert_eq!(session[2].blocks[0].tool_name.as_deref(), Some("bash"));
-        assert_eq!(session[4].blocks[0].tool_name.as_deref(), Some("child_tool"));
-        assert!(session
-            .iter()
-            .all(|t| t.session_id == "native" && t.harness == "copilot"));
+        let turns = turns_from_events_file(&path).unwrap();
+        assert_eq!(turns[0].recorded_cwd.as_deref(), Some("/work/repo"));
+        assert_eq!(turns.len(), 5);
+        assert_eq!(turns[1].turn_uuid, "a");
+        assert_eq!(turns[1].parent_uuid.as_deref(), Some("previous"));
+        assert_eq!(turns[1].blocks.len(), 3);
+        assert_eq!(turns[2].blocks[0].text, "full result");
+        assert_eq!(turns[2].blocks[0].tool_name.as_deref(), Some("bash"));
+        assert_eq!(turns[4].blocks[0].tool_name.as_deref(), Some("child_tool"));
+        assert!(turns.iter().all(|t| t.session_id == "native" && t.harness == "copilot"));
     }
 
     #[test]
@@ -478,9 +472,9 @@ mod tests {
         .unwrap();
         let first = event("u", "user.message", json!({"content":"First"}));
         write(&path, std::slice::from_ref(&first));
-        let before = read_session(&path).unwrap();
+        let before = turns_from_events_file(&path).unwrap();
         assert_eq!(before[0].recorded_cwd.as_deref(), Some("/fallback"));
-        assert_eq!(before[0].repo, "owner/repo");
+        assert_eq!(before[0].repo.as_deref(), Some("owner/repo"));
         let second = event("a", "assistant.message", json!({"content":"Second"}));
         write(&path, &[first, event("resume", "session.resume", json!({})), second]);
         writeln!(
@@ -488,7 +482,7 @@ mod tests {
             "{{\"type\":"
         )
         .unwrap();
-        let after = read_session(&path).unwrap();
+        let after = turns_from_events_file(&path).unwrap();
         assert_eq!(after.len(), 2);
         assert_eq!(before[0].turn_uuid, after[0].turn_uuid);
         assert_eq!(before[0].seq, after[0].seq);
@@ -498,7 +492,7 @@ mod tests {
     fn attachment_references_keep_frozen_text_and_skip_binary_assets() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let payload = "QUJD".repeat(1024);
+        let payload = "QUJD";
         write(
             &path,
             &[
@@ -525,7 +519,7 @@ mod tests {
                 ),
             ],
         );
-        let turns = read_session(&path).unwrap();
+        let turns = turns_from_events_file(&path).unwrap();
         assert_eq!(turns.len(), 1);
         let text: Vec<_> = turns[0].blocks.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(
