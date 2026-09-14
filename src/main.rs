@@ -84,8 +84,8 @@ enum Cmd {
     Index {
         /// A transcript tree or `.parquet` file, or a Hub trace repo `<org>/<repo>`. Omit — in a
         /// terminal — to index every known harness dir (~/.claude/projects, ~/.codex/sessions,
-        /// ~/.pi/agent/sessions); `--harness <name>` alone targets one. An automated (non-terminal)
-        /// run must name a target.
+        /// ~/.copilot/session-state, ~/.pi/agent/sessions, ~/.hermes/state.db); `--harness <name>`
+        /// alone targets one. An automated (non-terminal) run must name a target.
         path: Option<String>,
         /// Override harness auto-detection for PATH: claude | codex | copilot | pi | hermes.
         #[arg(long)]

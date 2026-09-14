@@ -12,18 +12,17 @@ use anyhow::{anyhow, Result};
 pub enum Harness {
     Claude,
     Codex,
+    Copilot,
     Pi,
     Hermes,
-    Copilot,
 }
 
-/// Session-dir tails funes recognizes, each with its harness. Order also fixes the no-arg scan
-/// order.
+/// Session-dir tails funes recognizes, each with its harness.
 const KNOWN_DIRS: &[(&str, Harness)] = &[
     (".claude/projects", Harness::Claude),
     (".codex/sessions", Harness::Codex),
-    (".pi/agent/sessions", Harness::Pi),
     (".copilot/session-state", Harness::Copilot),
+    (".pi/agent/sessions", Harness::Pi),
 ];
 
 impl Harness {
@@ -32,9 +31,9 @@ impl Harness {
         match self {
             Harness::Claude => "claude_code",
             Harness::Codex => "codex",
+            Harness::Copilot => "copilot",
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
-            Harness::Copilot => "copilot",
         }
     }
 
@@ -45,9 +44,9 @@ impl Harness {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
+            Harness::Copilot => "copilot",
             Harness::Pi => "pi",
             Harness::Hermes => "hermes",
-            Harness::Copilot => "copilot",
         }
     }
 
@@ -56,9 +55,9 @@ impl Harness {
         match s {
             "claude" | "claude_code" => Ok(Harness::Claude),
             "codex" => Ok(Harness::Codex),
+            "copilot" => Ok(Harness::Copilot),
             "pi" => Ok(Harness::Pi),
             "hermes" => Ok(Harness::Hermes),
-            "copilot" => Ok(Harness::Copilot),
             other => Err(anyhow!(
                 "unknown harness {other:?} (expected claude, codex, copilot, pi, or hermes)"
             )),
@@ -100,26 +99,17 @@ fn known_harness_roots_from(
 ) -> Vec<(PathBuf, Harness)> {
     let mut roots: Vec<(PathBuf, Harness)> = KNOWN_DIRS
         .iter()
-        .filter(|(_, h)| !matches!(h, Harness::Pi | Harness::Copilot))
-        .map(|(tail, h)| (home.join(tail), *h))
+        .map(|&(tail, harness)| {
+            let root = match harness {
+                Harness::Copilot => copilot_home.map(|p| p.join("session-state")),
+                Harness::Pi => pi_agent_dir.map(|p| p.join("sessions")),
+                _ => None,
+            }
+            .unwrap_or_else(|| home.join(tail));
+            (root, harness)
+        })
         .filter(|(dir, _)| dir.is_dir())
         .collect();
-
-    let pi_sessions = pi_agent_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| home.join(".pi/agent"))
-        .join("sessions");
-    if pi_sessions.is_dir() {
-        roots.push((pi_sessions, Harness::Pi));
-    }
-
-    let copilot = copilot_home
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| home.join(".copilot"))
-        .join("session-state");
-    if copilot.is_dir() {
-        roots.push((copilot, Harness::Copilot));
-    }
 
     let hermes_db = home.join(HERMES_DB);
     if hermes_db.is_file() {
@@ -177,10 +167,39 @@ mod tests {
         assert_eq!(Harness::parse("claude").unwrap(), Harness::Claude);
         assert_eq!(Harness::parse("claude_code").unwrap(), Harness::Claude);
         assert_eq!(Harness::parse("codex").unwrap(), Harness::Codex);
+        assert_eq!(Harness::parse("copilot").unwrap(), Harness::Copilot);
         assert_eq!(Harness::parse("pi").unwrap(), Harness::Pi);
         assert_eq!(Harness::parse("hermes").unwrap(), Harness::Hermes);
-        assert_eq!(Harness::parse("copilot").unwrap(), Harness::Copilot);
         assert!(Harness::parse("gpt").is_err());
+    }
+
+    #[test]
+    fn known_roots_follow_harness_order() {
+        let home = tempfile::tempdir().unwrap();
+        for (tail, _) in KNOWN_DIRS {
+            std::fs::create_dir_all(home.path().join(tail)).unwrap();
+        }
+        let hermes_db = home.path().join(HERMES_DB);
+        std::fs::create_dir_all(hermes_db.parent().unwrap()).unwrap();
+        std::fs::write(hermes_db, "").unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        std::fs::create_dir(custom.path().join("sessions")).unwrap();
+        std::fs::create_dir(custom.path().join("session-state")).unwrap();
+
+        for overrides in [None, Some(custom.path())] {
+            let roots = known_harness_roots_from(home.path(), overrides, overrides);
+            let harnesses: Vec<_> = roots.iter().map(|(_, harness)| *harness).collect();
+            assert_eq!(
+                harnesses,
+                [
+                    Harness::Claude,
+                    Harness::Codex,
+                    Harness::Copilot,
+                    Harness::Pi,
+                    Harness::Hermes
+                ]
+            );
+        }
     }
 
     #[test]

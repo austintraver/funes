@@ -87,19 +87,14 @@ pub fn read_session(path: &Path) -> Result<Session> {
         if event.get("ephemeral").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        let kind = string(&event, "type");
+        let kind = event["type"].as_str().unwrap_or_default();
         let data = &event["data"];
         if kind == "session.start" {
             if let Some(id) = data.get("sessionId").and_then(Value::as_str).filter(|s| !s.is_empty()) {
                 session_id = id.into();
             }
         }
-        if cwd.is_none()
-            && matches!(
-                kind.as_str(),
-                "session.start" | "session.resume" | "session.context_changed"
-            )
-        {
+        if cwd.is_none() && matches!(kind, "session.start" | "session.resume" | "session.context_changed") {
             cwd = data
                 .pointer("/context/cwd")
                 .or_else(|| data.get("cwd"))
@@ -110,7 +105,7 @@ pub fn read_session(path: &Path) -> Result<Session> {
         let agent = string(&event, "agentId");
         let mut blocks = Vec::new();
         let mut fallback_call = None;
-        let role = match kind.as_str() {
+        let role = match kind {
             "user.message" => {
                 blocks.extend(text_block("text", string(data, "content")));
                 "user"

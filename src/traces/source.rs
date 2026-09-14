@@ -217,10 +217,10 @@ impl TraceSource for JsonlTree {
         let turns = match self.harness {
             Harness::Claude => claude::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             Harness::Codex => codex::turns_from_jsonl_file(p, &fallback)?,
+            Harness::Copilot => anyhow::bail!("copilot sessions are read from events.jsonl by their dedicated source"),
             Harness::Pi => pi::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             // hermes keeps its sessions in a SQLite state.db, not a JSONL tree, so it's read by a
             // dedicated source and never reaches here.
-            Harness::Copilot => anyhow::bail!("copilot sessions are read from events.jsonl by their dedicated source"),
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };
         Ok(turns)
