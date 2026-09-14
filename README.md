@@ -67,9 +67,6 @@ in Codex next week, and each one recalls the *entire* history, not just its own 
 shows which agent it came from). Another agent can join through a compatible `.parquet` trace
 export; [the import contract](docs/index.md#parquet-trace-format) defines the required schema.
 
-`funes index --harness copilot` imports local Copilot sessions from the CLI, GitHub Copilot
-desktop app, and VS Code’s editor and Agents window.
-
 Models work the same way. funes runs pinned local embedding and reranking models, but no generative
 model of its own: you reason with whatever your agent uses — through **pi**, any local model or one
 served through the Hugging Face router. Switch models between sessions and the memory doesn't move.
