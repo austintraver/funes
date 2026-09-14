@@ -460,14 +460,12 @@ impl Indexer {
         if let Some(scanner) = &self.scanner {
             redact_turns(&mut turns, scanner, tiers, self.include_thinking)?;
         }
-        let mut chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
-        let cwd = self.sources[src_i].cwd(&self.units[i].1);
-        let repo = self.repo_for(cwd);
-        if !repo.is_empty() {
-            for c in &mut chunks {
-                c.repo.clone_from(&repo);
+        for turn in &mut turns {
+            if turn.repo.is_empty() {
+                turn.repo = self.repo_for(turn.recorded_cwd.as_deref());
             }
         }
+        let chunks = chunk::chunks_from_turns(&turns, tiers, self.include_thinking);
         let total_chunks = chunks.len();
         let added = if total_chunks == 0 {
             eprintln!("{progress} {label} — no indexable content");
@@ -506,16 +504,16 @@ impl Indexer {
         Ok(added)
     }
 
-    /// The session's repo(s), resolved from the source's raw cwd and cached so each distinct
+    /// The turn's repo(s), resolved from its recorded cwd and cached so each distinct
     /// checkout runs `git` once across the run. Empty when the source has no local cwd or the
     /// checkout can't be resolved (gone, not a git repo).
-    fn repo_for(&mut self, cwd: Option<String>) -> String {
+    fn repo_for(&mut self, cwd: Option<&str>) -> String {
         let Some(cwd) = cwd else {
             return String::new();
         };
         self.repo_cache
-            .entry(cwd.clone())
-            .or_insert_with(|| repo::of_cwd(&cwd))
+            .entry(cwd.to_owned())
+            .or_insert_with(|| repo::of_cwd(cwd))
             .clone()
     }
 
@@ -1182,6 +1180,8 @@ mod tests {
             }],
             source_path: String::new(),
             harness: "claude_code".into(),
+            recorded_cwd: None,
+            repo: String::new(),
         }];
         redact_turns(&mut turns, &scanner, &chunk::Tier::ALL, true).unwrap();
         assert_eq!(
@@ -1223,6 +1223,8 @@ mod tests {
             ],
             source_path: String::new(),
             harness: "claude_code".into(),
+            recorded_cwd: None,
+            repo: String::new(),
         }];
         // A text-only pass redacts the text block but leaves the tool_result it won't store untouched.
         redact_turns(&mut turns, &Fake, &[chunk::Tier::Text], true).unwrap();
@@ -1261,6 +1263,8 @@ mod tests {
             }],
             source_path: String::new(),
             harness: "codex".into(),
+            recorded_cwd: None,
+            repo: String::new(),
         }];
         let scanner = Recorder(std::cell::RefCell::new(String::new()));
         elide_turns(&mut turns);

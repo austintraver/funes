@@ -1,7 +1,6 @@
 //! Copilot CLI's persisted event stream. SDK and IDE-hosted CLI sessions use the same format.
 //! Lifecycle and streaming events are not conversation; only durable content enters memory.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -21,10 +20,27 @@ struct EventTurn {
     fallback_call: Option<String>,
 }
 
-/// Parsed content and the raw cwd, which the source keeps for repository attribution.
-struct Session {
-    turns: Vec<Turn>,
+#[derive(Default)]
+struct SessionContext {
     cwd: Option<String>,
+    repo: String,
+}
+
+impl From<&Value> for SessionContext {
+    fn from(value: &Value) -> Self {
+        Self {
+            cwd: value
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            repo: value
+                .get("repository")
+                .and_then(Value::as_str)
+                .and_then(super::repo::identity_from_path)
+                .unwrap_or_default(),
+        }
+    }
 }
 
 fn string(v: &Value, key: &str) -> String {
@@ -38,6 +54,31 @@ fn text_block(kind: &str, text: String) -> Option<Block> {
         tool_name: None,
         tool_use_id: None,
     })
+}
+
+fn attachment_block(attachment: &Value) -> Option<Block> {
+    let kind = attachment.get("type")?.as_str()?;
+    if !matches!(kind, "file" | "directory") {
+        return None;
+    }
+    let field = |key| {
+        attachment
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+    };
+    // The frozen reference describes the attachment at send time, even if the file has changed.
+    let reference = if let Some(entry) = field("taggedFilesEntry") {
+        entry.to_owned()
+    } else {
+        match (field("displayName"), field("path")) {
+            (Some(name), Some(path)) if name != path => format!("{name} ({path})"),
+            (_, Some(path)) => path.to_owned(),
+            (Some(name), None) => name.to_owned(),
+            (None, None) => return None,
+        }
+    };
+    text_block("text", format!("Attached {kind}: {reference}"))
 }
 
 fn json_text(v: Option<&Value>) -> String {
@@ -86,16 +127,16 @@ fn tool_result_block(data: &Value) -> Option<Block> {
     Some(block)
 }
 
-fn metadata_cwd(path: &Path) -> Option<String> {
+fn workspace_context(path: &Path) -> Option<SessionContext> {
     let file = File::open(path.parent()?.join("workspace.yaml")).ok()?;
-    let value: serde_yaml::Value = serde_yaml::from_reader(file).ok()?;
-    value.get("cwd")?.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+    let value: Value = serde_yaml::from_reader(file).ok()?;
+    Some(SessionContext::from(&value))
 }
 
 /// Stream a native `events.jsonl`, keeping parsed conversation but not the full event log.
 /// A partial final write is ignored, like the other event-log parsers. I/O errors propagate so
 /// the indexer never stamps an unreadable session as successfully indexed.
-fn read_session(path: &Path) -> Result<Session> {
+fn read_session(path: &Path) -> Result<Vec<Turn>> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut session_id = path
         .parent()
@@ -103,7 +144,7 @@ fn read_session(path: &Path) -> Result<Session> {
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_owned();
-    let mut cwd = None;
+    let mut context = workspace_context(path).unwrap_or_default();
     let mut events = Vec::new();
     let mut requested = HashSet::new();
     let mut names = HashMap::new();
@@ -123,13 +164,11 @@ fn read_session(path: &Path) -> Result<Session> {
                 session_id = id.into();
             }
         }
-        if cwd.is_none() && matches!(kind, "session.start" | "session.resume" | "session.context_changed") {
-            cwd = data
-                .pointer("/context/cwd")
-                .or_else(|| data.get("cwd"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned);
+        if matches!(kind, "session.start" | "session.resume" | "session.context_changed") {
+            let recorded = SessionContext::from(data.get("context").unwrap_or(data));
+            if recorded.cwd.is_some() || !recorded.repo.is_empty() {
+                context = recorded;
+            }
         }
         let agent = string(&event, "agentId");
         let mut blocks = Vec::new();
@@ -137,6 +176,9 @@ fn read_session(path: &Path) -> Result<Session> {
         let role = match kind {
             "user.message" => {
                 blocks.extend(text_block("text", string(data, "content")));
+                if let Some(attachments) = data.get("attachments").and_then(Value::as_array) {
+                    blocks.extend(attachments.iter().filter_map(attachment_block));
+                }
                 "user"
             }
             "assistant.message" => {
@@ -189,7 +231,9 @@ fn read_session(path: &Path) -> Result<Session> {
         events.push(EventTurn {
             turn: Turn {
                 session_id: String::new(),
-                workdir: String::new(),
+                workdir: context.cwd.as_deref().and_then(workdir_of_cwd).unwrap_or_default(),
+                recorded_cwd: context.cwd.clone(),
+                repo: context.repo.clone(),
                 turn_uuid: id,
                 parent_uuid: event.get("parentId").and_then(Value::as_str).map(str::to_owned),
                 seq: 0,
@@ -203,8 +247,6 @@ fn read_session(path: &Path) -> Result<Session> {
             fallback_call,
         });
     }
-    let cwd = cwd.or_else(|| metadata_cwd(path));
-    let workdir = cwd.as_deref().and_then(workdir_of_cwd).unwrap_or_default();
     let mut emitted_calls = requested;
     let mut turns = Vec::new();
     for mut event in events {
@@ -224,18 +266,16 @@ fn read_session(path: &Path) -> Result<Session> {
             }
         }
         event.turn.session_id.clone_from(&session_id);
-        event.turn.workdir.clone_from(&workdir);
         event.turn.seq = turns.len() as i64;
         turns.push(event.turn);
     }
-    Ok(Session { turns, cwd })
+    Ok(turns)
 }
 
 /// One session directory per unit. Artifacts and debug logs beside `events.jsonl` are excluded.
 pub(crate) struct CopilotSource {
     root: PathBuf,
     limit: Option<usize>,
-    cwds: RefCell<HashMap<String, Option<String>>>,
 }
 
 impl CopilotSource {
@@ -243,7 +283,6 @@ impl CopilotSource {
         Self {
             root: root.canonicalize().unwrap_or(root),
             limit,
-            cwds: RefCell::new(HashMap::new()),
         }
     }
 
@@ -318,17 +357,12 @@ impl TraceSource for CopilotSource {
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>> {
         let path = Path::new(&unit.key);
         let before = signature(path);
-        let session = read_session(path)?;
+        let turns = read_session(path)?;
         anyhow::ensure!(
             before == signature(path),
             "Copilot session changed while reading; retry indexing"
         );
-        self.cwds.borrow_mut().insert(unit.key.clone(), session.cwd);
-        Ok(session.turns)
-    }
-
-    fn cwd(&self, unit: &Unit) -> Option<String> {
-        self.cwds.borrow().get(&unit.key).cloned().flatten()
+        Ok(turns)
     }
 
     fn owns(&self, key: &str) -> bool {
@@ -420,16 +454,15 @@ mod tests {
             ],
         );
         let session = read_session(&path).unwrap();
-        assert_eq!(session.cwd.as_deref(), Some("/work/repo"));
-        assert_eq!(session.turns.len(), 5);
-        assert_eq!(session.turns[1].turn_uuid, "a");
-        assert_eq!(session.turns[1].parent_uuid.as_deref(), Some("previous"));
-        assert_eq!(session.turns[1].blocks.len(), 3);
-        assert_eq!(session.turns[2].blocks[0].text, "full result");
-        assert_eq!(session.turns[2].blocks[0].tool_name.as_deref(), Some("bash"));
-        assert_eq!(session.turns[4].blocks[0].tool_name.as_deref(), Some("child_tool"));
+        assert_eq!(session[0].recorded_cwd.as_deref(), Some("/work/repo"));
+        assert_eq!(session.len(), 5);
+        assert_eq!(session[1].turn_uuid, "a");
+        assert_eq!(session[1].parent_uuid.as_deref(), Some("previous"));
+        assert_eq!(session[1].blocks.len(), 3);
+        assert_eq!(session[2].blocks[0].text, "full result");
+        assert_eq!(session[2].blocks[0].tool_name.as_deref(), Some("bash"));
+        assert_eq!(session[4].blocks[0].tool_name.as_deref(), Some("child_tool"));
         assert!(session
-            .turns
             .iter()
             .all(|t| t.session_id == "native" && t.harness == "copilot"));
     }
@@ -438,11 +471,16 @@ mod tests {
     fn partial_tail_resume_and_metadata_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        std::fs::write(dir.path().join("workspace.yaml"), "cwd: /fallback\n").unwrap();
+        std::fs::write(
+            dir.path().join("workspace.yaml"),
+            "cwd: /fallback\nrepository: owner/repo\n",
+        )
+        .unwrap();
         let first = event("u", "user.message", json!({"content":"First"}));
         write(&path, std::slice::from_ref(&first));
         let before = read_session(&path).unwrap();
-        assert_eq!(before.cwd.as_deref(), Some("/fallback"));
+        assert_eq!(before[0].recorded_cwd.as_deref(), Some("/fallback"));
+        assert_eq!(before[0].repo, "owner/repo");
         let second = event("a", "assistant.message", json!({"content":"Second"}));
         write(&path, &[first, event("resume", "session.resume", json!({})), second]);
         writeln!(
@@ -451,9 +489,54 @@ mod tests {
         )
         .unwrap();
         let after = read_session(&path).unwrap();
-        assert_eq!(after.turns.len(), 2);
-        assert_eq!(before.turns[0].turn_uuid, after.turns[0].turn_uuid);
-        assert_eq!(before.turns[0].seq, after.turns[0].seq);
+        assert_eq!(after.len(), 2);
+        assert_eq!(before[0].turn_uuid, after[0].turn_uuid);
+        assert_eq!(before[0].seq, after[0].seq);
+    }
+
+    #[test]
+    fn attachment_references_keep_frozen_text_and_skip_binary_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let payload = "QUJD".repeat(1024);
+        write(
+            &path,
+            &[
+                event(
+                    "asset",
+                    "session.binary_asset",
+                    json!({
+                        "assetId":"sha256:asset", "type":"image", "mimeType":"image/png", "data":payload
+                    }),
+                ),
+                event(
+                    "user",
+                    "user.message",
+                    json!({
+                        "content":"Compare these files.",
+                        "attachments":[
+                            {"type":"file", "displayName":"report.md", "path":"/gone/report.md",
+                             "taggedFilesEntry":"* /gone/report.md (12 lines)"},
+                            {"type":"file", "displayName":"screenshot.png", "path":"/gone/screenshot.png",
+                             "assetId":"sha256:asset", "mimeType":"image/png", "data":payload},
+                            {"type":"directory", "path":"/gone/project"}
+                        ]
+                    }),
+                ),
+            ],
+        );
+        let turns = read_session(&path).unwrap();
+        assert_eq!(turns.len(), 1);
+        let text: Vec<_> = turns[0].blocks.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(
+            text,
+            [
+                "Compare these files.",
+                "Attached file: * /gone/report.md (12 lines)",
+                "Attached file: screenshot.png (/gone/screenshot.png)",
+                "Attached directory: /gone/project"
+            ]
+        );
     }
 
     #[test]

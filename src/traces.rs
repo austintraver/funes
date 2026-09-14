@@ -26,6 +26,10 @@ pub struct Block {
 pub struct Turn {
     pub session_id: String,
     pub workdir: String,
+    /// Raw directory recorded for this turn, used when repository attribution needs resolving.
+    pub recorded_cwd: Option<String>,
+    /// Repository identities in the stored facet format, recorded by the source or resolved locally.
+    pub repo: String,
     pub turn_uuid: String,
     pub parent_uuid: Option<String>,
     pub seq: i64,

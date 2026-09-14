@@ -46,12 +46,6 @@ pub trait TraceSource {
     /// Parse one unit into turns (each [`Turn`] already carries its `session_id` and `workdir`).
     fn read(&self, unit: &Unit) -> Result<Vec<Turn>>;
 
-    /// Raw local working directory for repository attribution. Sources whose metadata is not
-    /// ordinary JSONL override this; an absent or remote directory leaves the repo facet empty.
-    fn cwd(&self, unit: &Unit) -> Option<String> {
-        super::repo::cwd_of_transcript(Path::new(&unit.key))
-    }
-
     /// Whether a `read` error aborts the whole index. Best-effort sources (a JSONL tree, where one
     /// unreadable file shouldn't sink the run) return `false`; a single-artifact source (a parquet
     /// dataset) returns `true`, so a corrupt file is a hard failure rather than a silent skip.
@@ -214,7 +208,7 @@ impl TraceSource for JsonlTree {
         // Each parser derives the workdir facet from the session's recorded cwd; the path-derived
         // value is only the fallback for transcripts that never recorded one.
         let fallback = claude::workdir_of(p);
-        let turns = match self.harness {
+        let mut turns = match self.harness {
             Harness::Claude => claude::turns_from_jsonl_file(p, &jsonl::session_id_of(p), &fallback)?,
             Harness::Codex => codex::turns_from_jsonl_file(p, &fallback)?,
             Harness::Copilot => anyhow::bail!("copilot sessions are read from events.jsonl by their dedicated source"),
@@ -223,6 +217,10 @@ impl TraceSource for JsonlTree {
             // dedicated source and never reaches here.
             Harness::Hermes => anyhow::bail!("hermes sessions are read from state.db, not a JSONL tree"),
         };
+        let cwd = super::repo::cwd_of_transcript(p);
+        for turn in &mut turns {
+            turn.recorded_cwd.clone_from(&cwd);
+        }
         Ok(turns)
     }
 }

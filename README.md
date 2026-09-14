@@ -31,7 +31,7 @@ default):
 curl -fsSL https://huggingface.co/buckets/huggingface/funes/resolve/install.sh | sh
 ```
 
-Then add it to an agent with an installation integration:
+Then add it to your agent:
 
 ```bash
 funes add claude    # or codex, pi, hermes
