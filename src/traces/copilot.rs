@@ -100,11 +100,10 @@ fn tool_block(call: &Value, name_key: &str) -> Block {
 fn tool_result_block(data: &Value) -> Option<Block> {
     // Keep one representation of the result, preferring the complete display text.
     let result = &data["result"];
-    let text = result.get("detailedContent").or_else(|| result.get("content"));
-    let text = if text.is_some() {
-        json_text(text)
-    } else if data.get("error").is_some() {
-        json_text(data.get("error"))
+    let content = result.get("detailedContent").or_else(|| result.get("content"));
+    let content = content.or_else(|| data.get("error"));
+    let text = if content.is_some() {
+        json_text(content)
     } else {
         result
             .get("contents")

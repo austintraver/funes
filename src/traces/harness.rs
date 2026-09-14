@@ -17,7 +17,8 @@ pub enum Harness {
     Hermes,
 }
 
-/// Session-dir tails funes recognizes, each with its harness.
+/// Session-dir tails funes recognizes, each with its harness. Order also fixes the no-arg scan
+/// order.
 const KNOWN_DIRS: &[(&str, Harness)] = &[
     (".claude/projects", Harness::Claude),
     (".codex/sessions", Harness::Codex),
@@ -126,11 +127,8 @@ pub fn known_harness_roots() -> Vec<(PathBuf, Harness)> {
         None => return Vec::new(),
     };
     let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from);
-    known_harness_roots_from(
-        &home,
-        pi_agent_dir.as_deref(),
-        std::env::var_os("COPILOT_HOME").as_deref().map(Path::new),
-    )
+    let copilot_home = std::env::var_os("COPILOT_HOME").map(PathBuf::from);
+    known_harness_roots_from(&home, pi_agent_dir.as_deref(), copilot_home.as_deref())
 }
 
 #[cfg(test)]
