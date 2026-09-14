@@ -1,7 +1,6 @@
 //! End-to-end coverage for the native GitHub Copilot `events.jsonl` source.
 //!
-//! This test owns its memory directory because indexing and the read surface use process-global
-//! `FUNES_HOME`, and because the integration suite runs test binaries concurrently.
+//! Runs in its own test binary because `FUNES_HOME` is process-global.
 //!
 //! Fixture shape is based on github/copilot-sdk commit
 //! `0cb0050ef4a6206808c7229ee11715f01bc256b0` and the GitHub Copilot CLI

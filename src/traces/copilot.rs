@@ -1,5 +1,5 @@
 //! Copilot CLI's persisted event stream. SDK and IDE-hosted CLI sessions use the same format.
-//! Lifecycle and streaming events are not conversation; only durable content enters memory.
+//! Imports persisted messages, reasoning, tool requests, and tool results.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -128,9 +128,8 @@ fn workspace_context(path: &Path) -> Option<SessionContext> {
     Some(SessionContext::from(&value))
 }
 
-/// Stream a native `events.jsonl`, keeping parsed conversation but not the full event log.
-/// A partial final write is ignored, like the other event-log parsers. I/O errors propagate so
-/// the indexer never stamps an unreadable session as successfully indexed.
+/// Stream native `events.jsonl` into turns. Skip malformed JSON records, including partial
+/// trailing writes; propagate I/O errors so indexing can retry.
 fn turns_from_events_file(path: &Path) -> Result<Vec<Turn>> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut session_id = path
