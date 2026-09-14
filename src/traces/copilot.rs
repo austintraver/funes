@@ -22,9 +22,9 @@ struct EventTurn {
 }
 
 /// Parsed content and the raw cwd, which the source keeps for repository attribution.
-pub struct Session {
-    pub turns: Vec<Turn>,
-    pub cwd: Option<String>,
+struct Session {
+    turns: Vec<Turn>,
+    cwd: Option<String>,
 }
 
 fn string(v: &Value, key: &str) -> String {
@@ -57,6 +57,35 @@ fn tool_block(call: &Value, name_key: &str) -> Block {
     }
 }
 
+fn tool_result_block(data: &Value) -> Option<Block> {
+    // Keep one representation of the result, preferring the complete display text.
+    // Opaque/binary content is not useful text and is not decoded.
+    let result = &data["result"];
+    let text = result.get("detailedContent").or_else(|| result.get("content"));
+    let text = if text.is_some() {
+        json_text(text)
+    } else if data.get("error").is_some() {
+        json_text(data.get("error"))
+    } else if result.is_string() {
+        json_text(Some(result))
+    } else {
+        result
+            .get("contents")
+            .and_then(Value::as_array)
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    };
+    let mut block = text_block("tool_result", text)?;
+    block.tool_use_id = data.get("toolCallId").and_then(Value::as_str).map(str::to_owned);
+    Some(block)
+}
+
 fn metadata_cwd(path: &Path) -> Option<String> {
     let file = File::open(path.parent()?.join("workspace.yaml")).ok()?;
     let value: serde_yaml::Value = serde_yaml::from_reader(file).ok()?;
@@ -66,7 +95,7 @@ fn metadata_cwd(path: &Path) -> Option<String> {
 /// Stream a native `events.jsonl`, keeping parsed conversation but not the full event log.
 /// A partial final write is ignored, like the other event-log parsers. I/O errors propagate so
 /// the indexer never stamps an unreadable session as successfully indexed.
-pub fn read_session(path: &Path) -> Result<Session> {
+fn read_session(path: &Path) -> Result<Session> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut session_id = path
         .parent()
@@ -140,33 +169,7 @@ pub fn read_session(path: &Path) -> Result<Session> {
                 "assistant"
             }
             "tool.execution_complete" => {
-                // Keep one representation of the result, preferring the complete display text.
-                // Opaque/binary content is not useful text and is not decoded.
-                let result = &data["result"];
-                let text = result.get("detailedContent").or_else(|| result.get("content"));
-                let text = if text.is_some() {
-                    json_text(text)
-                } else if data.get("error").is_some() {
-                    json_text(data.get("error"))
-                } else if result.is_string() {
-                    json_text(Some(result))
-                } else {
-                    result
-                        .get("contents")
-                        .and_then(Value::as_array)
-                        .map(|parts| {
-                            parts
-                                .iter()
-                                .filter_map(|p| p.get("text").and_then(Value::as_str))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        })
-                        .unwrap_or_default()
-                };
-                if let Some(mut block) = text_block("tool_result", text) {
-                    block.tool_use_id = data.get("toolCallId").and_then(Value::as_str).map(str::to_owned);
-                    blocks.push(block);
-                }
+                blocks.extend(tool_result_block(data));
                 "tool"
             }
             _ => continue,
@@ -202,12 +205,11 @@ pub fn read_session(path: &Path) -> Result<Session> {
     }
     let cwd = cwd.or_else(|| metadata_cwd(path));
     let workdir = cwd.as_deref().and_then(workdir_of_cwd).unwrap_or_default();
-    let mut fallback_seen = HashSet::new();
+    let mut emitted_calls = requested;
     let mut turns = Vec::new();
     for mut event in events {
         if let Some(call) = &event.fallback_call {
-            let key = (event.agent.clone(), call.clone());
-            if requested.contains(&key) || !fallback_seen.insert(key) {
+            if !emitted_calls.insert((event.agent.clone(), call.clone())) {
                 continue;
             }
         }
@@ -230,14 +232,14 @@ pub fn read_session(path: &Path) -> Result<Session> {
 }
 
 /// One session directory per unit. Artifacts and debug logs beside `events.jsonl` are excluded.
-pub struct CopilotSource {
+pub(crate) struct CopilotSource {
     root: PathBuf,
     limit: Option<usize>,
     cwds: RefCell<HashMap<String, Option<String>>>,
 }
 
 impl CopilotSource {
-    pub fn new(root: PathBuf, limit: Option<usize>) -> Self {
+    pub(crate) fn new(root: PathBuf, limit: Option<usize>) -> Self {
         Self {
             root: root.canonicalize().unwrap_or(root),
             limit,
@@ -298,10 +300,7 @@ impl TraceSource for CopilotSource {
     fn units(&self) -> Result<Vec<Unit>> {
         let mut files = self.files()?;
         files.sort_by_cached_key(|p| {
-            (
-                std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH)),
-                p.clone(),
-            )
+            std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH))
         });
         if let Some(limit) = self.limit {
             files.truncate(limit);

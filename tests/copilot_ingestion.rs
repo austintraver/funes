@@ -73,6 +73,12 @@ fn write_session(root: &Path, include_appended_turn: bool) {
     }
 }
 
+async fn index_copilot(root: &Path) {
+    funes::commands::index::run_index_roots(&[(root.to_path_buf(), Some(Harness::Copilot))], false, None, true)
+        .await
+        .unwrap();
+}
+
 async fn chunk_count() -> usize {
     let status = funes::commands::recall::status(funes::memory::Memory::local())
         .await
@@ -116,26 +122,12 @@ async fn copilot_native_events_index_incrementally_and_read_back() {
     std::env::set_var("FUNES_HOME", incremental_memory.path());
     write_session(incremental_source.path(), false);
 
-    funes::commands::index::run_index_roots(
-        &[(incremental_source.path().to_path_buf(), Some(Harness::Copilot))],
-        false,
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    index_copilot(incremental_source.path()).await;
     let first_count = chunk_count().await;
     assert!(first_count > 0, "initial Copilot events produced no chunks");
 
     write_session(incremental_source.path(), true);
-    funes::commands::index::run_index_roots(
-        &[(incremental_source.path().to_path_buf(), Some(Harness::Copilot))],
-        false,
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    index_copilot(incremental_source.path()).await;
     let incremental_count = chunk_count().await;
     assert!(
         incremental_count > first_count,
@@ -143,14 +135,7 @@ async fn copilot_native_events_index_incrementally_and_read_back() {
     );
 
     // Re-indexing the unchanged native session is idempotent.
-    funes::commands::index::run_index_roots(
-        &[(incremental_source.path().to_path_buf(), Some(Harness::Copilot))],
-        false,
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    index_copilot(incremental_source.path()).await;
     assert_eq!(chunk_count().await, incremental_count);
 
     let session = "native-copilot-0001".to_string();
@@ -214,14 +199,7 @@ async fn copilot_native_events_index_incrementally_and_read_back() {
     let scratch_memory = tempfile::tempdir().unwrap();
     write_session(scratch_source.path(), true);
     std::env::set_var("FUNES_HOME", scratch_memory.path());
-    funes::commands::index::run_index_roots(
-        &[(scratch_source.path().to_path_buf(), Some(Harness::Copilot))],
-        false,
-        None,
-        true,
-    )
-    .await
-    .unwrap();
+    index_copilot(scratch_source.path()).await;
     assert_eq!(
         chunk_count().await,
         incremental_count,
