@@ -13,8 +13,9 @@ use funes::traces::harness::Harness;
 use funes::ui::render;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{IsTerminal, Write};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,12 @@ use std::sync::{Arc, Mutex};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum McpTransport {
+    Stdio,
+    StreamableHttp,
 }
 
 #[derive(Subcommand)]
@@ -197,12 +204,26 @@ enum Cmd {
         #[arg(short, long)]
         force: bool,
     },
-    /// Run as an MCP server over stdio (for Claude Code, Cursor, …).
+    /// Serve read tools over MCP, using stdio or Streamable HTTP.
     Mcp {
         /// Memory to serve — an `<org>/<repo>` shorthand, an `hf://…` URI, a local path, or `local`.
         /// Defaults to your local memory.
         #[arg(value_name = "MEMORY")]
         memory: Option<String>,
+        /// MCP transport to serve.
+        #[arg(long, value_enum, default_value = "stdio")]
+        transport: McpTransport,
+        /// HTTP listen address (default: 127.0.0.1:1942). Port 0 selects an available port.
+        #[arg(long, value_name = "ADDRESS")]
+        bind: Option<SocketAddr>,
+        /// Additional HTTP Host authority to accept; repeat for multiple names. Loopback names
+        /// and a concrete bound IP are already allowed. A wildcard bind does not allow every Host.
+        #[arg(long, value_name = "HOST")]
+        allowed_host: Vec<String>,
+        /// Additional browser Origin to accept (scheme://host:port); repeat for multiple origins.
+        /// Local endpoint origins are already allowed. Requests without Origin are permitted.
+        #[arg(long, value_name = "ORIGIN")]
+        allowed_origin: Vec<String>,
     },
     /// Add funes to a coding agent.
     ///
@@ -521,7 +542,30 @@ async fn main() -> Result<()> {
         }
         Cmd::Scrub => scrub::run().await,
         Cmd::Update { force } => update::run(force).await,
-        Cmd::Mcp { memory } => mcp::run(memory).await,
+        Cmd::Mcp {
+            memory,
+            transport,
+            bind,
+            allowed_host,
+            allowed_origin,
+        } => match transport {
+            McpTransport::Stdio => {
+                if bind.is_some() || !allowed_host.is_empty() || !allowed_origin.is_empty() {
+                    anyhow::bail!("--bind, --allowed-host and --allowed-origin require --transport streamable-http");
+                }
+                mcp::run(memory).await
+            }
+            McpTransport::StreamableHttp => {
+                mcp::run_http(
+                    memory,
+                    // Borges first published "Funes el memorioso" in 1942.
+                    bind.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 1942))),
+                    allowed_host,
+                    allowed_origin,
+                )
+                .await
+            }
+        },
         Cmd::Add { agent } => match agent {
             // `add` bootstraps the local pipeline: build the first index and do the first push — the
             // two one-time steps the automation can't do unattended — so nothing is left to run by hand.
