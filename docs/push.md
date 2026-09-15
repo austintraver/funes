@@ -56,9 +56,8 @@ has not crossed a publication boundary. It prints a warning that index-time reda
 Push is the hard boundary. A separate, **always-on, fail-closed gate** requires TruffleHog and scans
 the rows about to leave the machine. It reconstructs complete content blocks before scanning, so a
 secret split across chunks cannot evade detection. If any chunk of a block contains a secret, every
-chunk of that block is held back; unrelated clean rows still publish with a warning. Transcript text
-such as `trufflehog:ignore` does not suppress this gate. Only when that leaves *nothing* to publish
-does push exit non-zero (code `2`):
+chunk of that block is held back; unrelated clean rows still publish with a warning. Only when that
+leaves *nothing* to publish does push exit non-zero (code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
