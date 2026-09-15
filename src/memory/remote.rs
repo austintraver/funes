@@ -17,9 +17,8 @@
 //!
 //! A multi-file write would then be several commits — non-atomic, no CAS. So the op runs through a
 //! [`CaptureStore`](super::capture_store::CaptureStore) installed via Lance's
-//! [`WrappingObjectStore`] seam: Lance's writes are captured in temporary files instead of hitting the Hub,
-//! and we ship the whole set as one guarded `create_commit`. The Hub client streams Xet files
-//! from these paths; its regular-file/non-Xet fallback still buffers inline commit content.
+//! [`WrappingObjectStore`] seam. Writes land in temporary files whose paths are passed to one
+//! guarded `create_commit`.
 //!
 //! # Why this shape
 //!
@@ -545,7 +544,6 @@ mod tests {
     use lance_index::scalar::InvertedIndexParams;
     use lance_index::IndexType;
 
-    /// Exact inventory of the tiny seed backend, detecting stray data writes as well as commits.
     async fn store_inventory(store: &dyn OSObjectStore) -> Result<BTreeMap<String, Bytes>> {
         use futures::TryStreamExt;
 
@@ -562,8 +560,6 @@ mod tests {
         Ok(files)
     }
 
-    /// Exercises native Lance writes through the capture wrapper. A failed/conflicted commit
-    /// leaves the base unchanged, and replaying the same reader produces the same logical rows.
     #[tokio::test]
     async fn captured_append_is_readable_and_replay_leaves_base_unchanged() {
         let schema = dataset::schema();

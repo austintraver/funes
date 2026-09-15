@@ -9,9 +9,6 @@ use futures::TryStreamExt;
 use lance::{dataset::ROW_ID, Dataset};
 use std::collections::HashSet;
 
-/// Don't make this a scan filter. On a memory that hasn't been pushed in a while, that filter lists
-/// every pending id. Lance copies the whole filter into every fragment before it reads a row. RAM
-/// use climbs with both the size of the backlog and the number of fragments.
 pub(super) async fn rows_with_ids(local: &Dataset, ids: &HashSet<String>) -> Result<Vec<RecordBatch>> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -43,13 +40,6 @@ pub(super) async fn rows_with_ids(local: &Dataset, ids: &HashSet<String>) -> Res
     Ok(selected)
 }
 
-/// Scan the to-push `batches` and hold back every row of any *block* that holds a secret, returning
-/// the clean batches and what was held back. Detection works at block granularity: a block's chunks
-/// are reconstructed into their contiguous text (so a secret `split` cut across chunks is whole and
-/// detectable), scanned in one pass, and the scanner says which block each finding came from — never
-/// the secret's value, which fails on text stored with escaped or quoted bytes. If any
-/// chunk of a block is dirty, the whole block is held back (its other chunks carry the rest of the
-/// secret). Fail-closed on the scanner — a push must scan before it uploads.
 pub(super) fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skipped)> {
     let scanner = scan::Trufflehog::find()?;
     // Row order across batches matches `chunks_from_batches`, so a chunk's index is its global row.
@@ -81,7 +71,6 @@ pub(super) fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordB
         ));
     }
 
-    // Drop the dirty rows batch by batch, mapping each global row index back via a running offset.
     let mut clean = Vec::with_capacity(batches.len());
     let mut base = 0usize;
     for b in &batches {

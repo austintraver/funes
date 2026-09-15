@@ -19,7 +19,6 @@ use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
-/// Bounds fetched content, independently of the number of selected rows or fragments.
 const BATCH_ROWS: usize = 8192;
 
 struct Row {
