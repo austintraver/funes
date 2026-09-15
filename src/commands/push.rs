@@ -429,8 +429,7 @@ pub async fn run_push(target: Memory, force_reindex: bool, confirm: Confirm, ses
         return Ok(format!("{}: up to date ({} chunks)\n{note}", target.label(), remote_ids.len()).into());
     }
 
-    // 4. Select metadata from this pinned dataset, scan complete blocks without vectors, then
-    // spool clean full rows. No commit is attempted until preparation succeeds in full.
+    // 4. Prepare clean rows for publication.
     let remote_count = remote_ids.len();
     drop(remote_ids);
     drop(candidates);
@@ -936,7 +935,6 @@ mod tests {
         let empty = prepare::Selection::read(&ds, &HashSet::new()).await.unwrap();
         assert_eq!(empty.len(), 0, "an empty selection must not become all rows");
 
-        // The old unselected first publish scanned all rows, without an ID predicate.
         let all_rows = dataset::scan_rows(&ds, &[], None, None).await.unwrap();
         let (legacy, expected_held) = drop_secret_rows(all_rows).unwrap();
         let all = prepare::Selection::read_all(&ds).await.unwrap();

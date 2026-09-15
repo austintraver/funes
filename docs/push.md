@@ -41,11 +41,8 @@ run this at session boundaries automatically; see [automation.md](automation.md)
 
 Pushes stage reconstructed blocks, clean rows, and generated dataset files under `TMPDIR` when set.
 Otherwise, Linux uses `/var/tmp` to avoid the commonly RAM-backed `/tmp`; macOS uses its OS temporary
-directory.
-Allow enough free space there for the clean-row spool and generated dataset files together. Staging
-failures stop the data publication; the next push compares against the remote again. Temporary files
-are removed when preparation or publication returns. ID and block metadata still scale with the
-backlog, and secret scanning and index construction have their own memory costs.
+directory. Allow enough free space there for the clean-row spool and generated dataset files
+together. Temporary files are removed when preparation or publication returns.
 
 ## Keeping secrets out: the gate and `funes scrub`
 

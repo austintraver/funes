@@ -37,7 +37,6 @@ struct CaptureState {
     next: AtomicU64,
 }
 
-/// Shared disk-backed writes, with snapshots independent of subsequent logical overwrites.
 #[derive(Clone, Debug)]
 pub(crate) struct Captured {
     state: Arc<CaptureState>,
@@ -61,7 +60,6 @@ impl Captured {
         self.state.files.lock().unwrap().clone()
     }
 
-    // Return owned snapshots so no mutex guard can cross an await.
     fn get(&self, location: &OPath) -> Option<CapturedFile> {
         self.state.files.lock().unwrap().get(location).cloned()
     }
@@ -94,7 +92,6 @@ impl Captured {
     }
 }
 
-/// Reads delegate to `inner` unless captured; writes remain local until the caller commits them.
 #[derive(Debug)]
 pub(crate) struct CaptureStore {
     inner: Arc<dyn OSObjectStore>,
@@ -202,7 +199,6 @@ impl OSObjectStore for CaptureStore {
     async fn copy_opts(&self, from: &OPath, to: &OPath, _opts: CopyOptions) -> OSResult<()> {
         let hit = self.captured.get(from);
         if let Some(file) = hit {
-            // Immutable files can be shared safely, including across later overwrites of `from`.
             self.captured.insert(to.clone(), file);
             return Ok(());
         }
