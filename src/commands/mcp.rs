@@ -7,7 +7,7 @@ use crate::memory::Memory;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo};
+use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerConfig};
 use rmcp::transport::stdio;
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 
@@ -311,11 +311,11 @@ impl Funes {
 
 #[tool_handler]
 impl ServerHandler for Funes {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut server_info = Implementation::default();
         server_info.name = "funes".to_string();
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(

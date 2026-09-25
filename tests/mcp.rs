@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use rmcp::{
-    model::{CallToolRequestParams, ClientInfo, ProtocolVersion, Tool},
+    model::{CallToolRequestParams, ClientConfig, ProtocolVersion, Tool},
     service::{ClientLifecycleMode, ClientServiceExt},
     transport::{streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport},
     ServiceExt,
@@ -25,7 +25,7 @@ async fn modern_http_discovers_and_calls_the_existing_tools() -> Result<()> {
         server.client.clone(),
         StreamableHttpClientTransportConfig::with_uri(server.url.clone()),
     );
-    let client = ClientInfo::default()
+    let client = ClientConfig::default()
         .serve_with_lifecycle(
             transport,
             ClientLifecycleMode::Discover {
@@ -68,7 +68,7 @@ async fn existing_stdio_handshake_and_tools_still_work() -> Result<()> {
         .stdout(Stdio::piped())
         .spawn()?;
     let transport = (child.stdout.take().unwrap(), child.stdin.take().unwrap());
-    let client = ClientInfo::default()
+    let client = ClientConfig::default()
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .serve(transport)
         .await?;

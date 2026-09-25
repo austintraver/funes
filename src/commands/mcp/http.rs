@@ -92,8 +92,12 @@ fn valid_authority(authority: &Authority) -> bool {
 }
 
 fn endpoint_config(address: SocketAddr, hosts: Vec<String>, origins: Vec<String>) -> StreamableHttpServerConfig {
-    // The SDK routes modern requests statelessly and manages sessions for older clients.
-    let mut config = StreamableHttpServerConfig::default().with_json_response(true);
+    // The SDK routes modern requests statelessly and manages sessions for older clients. Origin
+    // validation is enforced even if the allowlist below were ever empty: the Streamable HTTP
+    // transport requires a 403 for an invalid Origin, and an empty list would otherwise skip the check.
+    let mut config = StreamableHttpServerConfig::default()
+        .with_json_response(true)
+        .enforce_origin_validation();
     config.allowed_origins = ["localhost", "127.0.0.1", "[::1]"]
         .map(|host| format!("http://{host}:{}", address.port()))
         .into();
