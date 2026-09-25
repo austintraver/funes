@@ -1,12 +1,12 @@
 //! `funes mcp --transport streamable-http`: one long-lived server that many agent sessions share,
 //! so the recall models load once per host instead of once per session.
 //!
-//! The SDK speaks the protocol; this module owns the socket, which Hosts and Origins may reach it,
-//! and shutdown. It deliberately keeps no MCP sessions. Every tool call already names everything it
-//! needs (the memory is resolved per call, the models live in a process-wide cache), so a session
-//! would carry no state, only a way to fail: a restart drops it, and a client whose session vanished
-//! gets 404 until it re-initializes, which clients surface as an expired session.
-//! Without sessions, a server restarted under a service manager is invisible to its clients.
+//! The SDK speaks the protocol; this module owns the socket, the Host and Origin allowlists, and
+//! shutdown. It keeps no MCP sessions. A tool call carries everything it needs (the memory is
+//! resolved per call, the models live in a process-wide cache), so a session would hold no state.
+//! It would only give a restart something to break: the new process answers the old session id with
+//! 404, and a client that does not re-initialize then fails every call. Without sessions, a server
+//! restarted under a service manager is invisible to its clients.
 
 use super::Funes;
 use anyhow::{ensure, Context, Result};
@@ -32,8 +32,8 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding MCP HTTP listener at {bind}"))?;
-    // Browsers send the port they actually reached, so the Origin allowlist must name the bound
-    // port, which differs from the requested one when the caller asked for port 0.
+    // The Origin allowlist needs the port browsers actually reach, which differs from the requested
+    // one when the caller asked for port 0.
     let address = listener.local_addr().context("reading MCP listen address")?;
     let cancellation = CancellationToken::new();
     let config =
@@ -47,6 +47,8 @@ pub async fn run(
     let router = axum::Router::new()
         .nest_service("/mcp", service)
         .layer(from_fn_with_state(cancellation.clone(), cancel_on_shutdown));
+    // Whatever launched the server may treat this line as its readiness signal, so it must follow
+    // the bind; with port 0 it is also the only report of the port the system chose.
     eprintln!("MCP listening at http://{address}/mcp");
     let server = axum::serve(listener, router)
         .with_graceful_shutdown(cancellation.clone().cancelled_owned())
@@ -62,9 +64,9 @@ pub async fn run(
     }
 }
 
-/// Graceful shutdown waits for open requests, and a recall can take seconds. Racing each request
-/// against the shutdown token lets SIGTERM from a service manager stop the process promptly, instead
-/// of waiting out a slow recall or a client that never finishes sending its body.
+/// Graceful shutdown would wait for every open request, including a recall that takes seconds or an
+/// upload a client never finishes. Racing each request against the shutdown token lets SIGTERM from
+/// a service manager stop the process promptly.
 async fn cancel_on_shutdown(State(cancellation): State<CancellationToken>, request: Request, next: Next) -> Response {
     tokio::select! {
         response = next.run(request) => response,
@@ -118,8 +120,8 @@ fn endpoint_config(address: SocketAddr, hosts: Vec<String>, origins: Vec<String>
     config.allowed_origins = ["localhost", "127.0.0.1", "[::1]"]
         .map(|host| format!("http://{host}:{}", address.port()))
         .into();
-    // A wildcard bind is not an address a legitimate client names (a web page aiming at 0.0.0.0 is
-    // the rebinding case), so it never joins the lists; the operator names reachable hosts instead.
+    // A wildcard bind is not an address a legitimate client names; a web page aiming at 0.0.0.0 is
+    // the rebinding case. The operator names reachable hosts with --allowed-host instead.
     if !address.ip().is_unspecified() {
         config.allowed_hosts.push(address.ip().to_string());
         config.allowed_origins.push(format!("http://{address}"));

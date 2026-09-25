@@ -92,7 +92,7 @@ async fn http_restart_is_invisible_to_an_initialized_client() -> Result<()> {
     let home = tempfile::tempdir()?;
     let mut server = HttpServer::new(home.path(), None, &[]).await?;
     // rmcp's client re-initializes after a lost session by default, which would hide the failure.
-    // Claude Code does not (anthropics/claude-code#9608), so the client here must not either.
+    // Claude Code does not (anthropics/claude-code#9608).
     let transport = StreamableHttpClientTransport::with_client(
         server.client.clone(),
         StreamableHttpClientTransportConfig::with_uri(server.url.clone()).reinit_on_expired_session(false),
@@ -240,16 +240,15 @@ impl HttpServer {
         })
     }
 
-    /// Mirrors a service manager replacing a killed unit: connected clients keep the URL they
-    /// already hold, so the replacement must come back on the same address.
+    /// Mirrors a service manager replacing a killed unit under clients that keep the URL they
+    /// already hold.
     async fn restart(&mut self) -> Result<()> {
         self.process.kill().await?;
         (self.process, _) = Self::spawn(&self.home, &self.args, self.address).await?;
         Ok(())
     }
 
-    /// The server prints its URL only after binding, so reading that line is the readiness wait,
-    /// and with port 0 it is also the only place the chosen port appears.
+    /// Reading the listening line doubles as the wait for the server to be ready.
     async fn spawn(home: &Path, args: &[OsString], bind: SocketAddr) -> Result<(Child, String)> {
         let mut process = command(home)
             .args(["mcp", "--transport", "streamable-http", "--bind", &bind.to_string()])
