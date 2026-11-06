@@ -427,7 +427,7 @@ async fn replay(
             Err(e) => {
                 return Ok(Replayed::Uncertain(
                     anyhow::Error::new(e).context("compaction commit failed"),
-                ));
+                ))
             }
         }
     }

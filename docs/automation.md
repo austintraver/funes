@@ -77,11 +77,10 @@ validates a producer's output without writing anything, so run it before wiring 
   memory, so it never blocks an index — and a publish that finds another in flight steps aside; the
   next session start sweeps it. Nothing is serialized across machines: two hosts publishing to one
   memory still race on the Hub.
-- **Secrets held back.** Indexing redacts credentials best-effort; push has a separate always-on,
-  fail-closed gate. It withholds secret-bearing rows and records their block coordinates for a later
-  `funes swab <memory>`. A daily swab repairs only those queued blocks, and a later push can publish
-  the repaired rows. `funes scrub` remains the full-memory scan and removes older local versions
-  and unreferenced files; it does not guarantee physical erasure of deleted bytes in live fragments.
+- **Secrets held back.** funes redacts credentials at index time; on push, a separate always-on gate
+  withholds any chunk that still contains one — the clean rows publish, and the push exits non-zero
+  (code `2`) only if that leaves nothing to publish. Run `funes swab <memory>` to repair the queued
+  blocks, then push again. See [the push guide](push.md) for the full-memory `funes scrub` command.
 - **The card rides along.** A push to a memory at the repo root creates the repo's dataset card
   (tagged `funes`) and keeps its stats fresh — in the same commit as the data. A hand-written
   card is never touched.

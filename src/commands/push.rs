@@ -230,9 +230,7 @@ pub async fn run(spec: &str, compact: bool, yes: bool, sessions: &[String]) -> R
 
 /// The error for a token the Hub lets read `label` but not write to.
 pub(crate) fn read_only_error(label: &str) -> anyhow::Error {
-    anyhow!(
-        "{label} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
-    )
+    anyhow!("{label} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)")
 }
 
 /// The push confirmation for a target holding none of the chunks to publish. Fails closed (returns
@@ -563,7 +561,7 @@ fn card_file(remote_readme: Result<Option<String>>, ctx: &CardCtx) -> (Option<St
             return (
                 None,
                 format!("  note: dataset card left untouched (couldn't read the current one: {e})\n"),
-            );
+            )
         }
     };
     match card::plan(existing.as_deref(), ctx) {

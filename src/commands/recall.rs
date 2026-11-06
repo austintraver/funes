@@ -1139,55 +1139,48 @@ async fn scan_sessions(ds: &Dataset, session_ids: &[String]) -> Result<Vec<Sessi
     } else {
         Some(dataset::in_list("session_id", session_ids.iter().map(String::as_str)))
     };
-    let by_id: HashMap<String, Fold> = dataset::scan_fold(
-        ds,
-        &cols,
-        filter.as_deref(),
-        None,
-        HashMap::new(),
-        |mut by_id, batch| {
-            let (sid, ts, wd, turn, harness, repo) = (
-                dataset::strs(&batch, "session_id"),
-                dataset::strs(&batch, "ts"),
-                dataset::strs(&batch, "workdir"),
-                dataset::strs(&batch, "turn_uuid"),
-                dataset::strs(&batch, "harness"),
-                dataset::strs(&batch, "repo"),
-            );
-            let seq = dataset::ints(&batch, "seq");
-            for i in 0..batch.num_rows() {
-                let id = sid.get(i).to_string();
-                let row_seq = seq.get(i);
-                let fold = by_id.entry(id.clone()).or_insert_with(|| Fold {
-                    session: Session {
-                        session_id: id,
-                        ts: ts.get(i).to_string(),
-                        last_ts: ts.get(i).to_string(),
-                        workdir: wd.get(i).to_string(),
-                        harness: harness.get(i).to_string(),
-                        repo: repo.get(i).to_string(),
-                        turns: 0,
-                        first_prompt: String::new(),
-                    },
-                    turns: HashSet::new(),
-                    last_seq: row_seq,
-                });
-                // Rows arrive in scan order, not time order, so the first one seen isn't the earliest.
-                let row_ts = ts.get(i).to_string();
-                if row_ts < fold.session.ts {
-                    fold.session.ts = row_ts.clone();
-                }
-                // The last turn is the highest seq, whatever its stamp: a source may stamp its turns
-                // out of order.
-                if row_seq > fold.last_seq {
-                    fold.last_seq = row_seq;
-                    fold.session.last_ts = row_ts;
-                }
-                fold.turns.insert((row_seq, turn.get(i).to_string()));
+    let by_id = dataset::scan_fold(ds, &cols, filter.as_deref(), None, HashMap::new(), |mut by_id, batch| {
+        let (sid, ts, wd, turn, harness, repo) = (
+            dataset::strs(&batch, "session_id"),
+            dataset::strs(&batch, "ts"),
+            dataset::strs(&batch, "workdir"),
+            dataset::strs(&batch, "turn_uuid"),
+            dataset::strs(&batch, "harness"),
+            dataset::strs(&batch, "repo"),
+        );
+        let seq = dataset::ints(&batch, "seq");
+        for i in 0..batch.num_rows() {
+            let id = sid.get(i).to_string();
+            let row_seq = seq.get(i);
+            let fold = by_id.entry(id.clone()).or_insert_with(|| Fold {
+                session: Session {
+                    session_id: id,
+                    ts: ts.get(i).to_string(),
+                    last_ts: ts.get(i).to_string(),
+                    workdir: wd.get(i).to_string(),
+                    harness: harness.get(i).to_string(),
+                    repo: repo.get(i).to_string(),
+                    turns: 0,
+                    first_prompt: String::new(),
+                },
+                turns: HashSet::new(),
+                last_seq: row_seq,
+            });
+            // Rows arrive in scan order, not time order, so the first one seen isn't the earliest.
+            let row_ts = ts.get(i).to_string();
+            if row_ts < fold.session.ts {
+                fold.session.ts = row_ts.clone();
             }
-            by_id
-        },
-    )
+            // The last turn is the highest seq, whatever its stamp: a source may stamp its turns
+            // out of order.
+            if row_seq > fold.last_seq {
+                fold.last_seq = row_seq;
+                fold.session.last_ts = row_ts;
+            }
+            fold.turns.insert((row_seq, turn.get(i).to_string()));
+        }
+        by_id
+    })
     .await?;
 
     let mut out: Vec<Session> = by_id
