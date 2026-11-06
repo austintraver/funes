@@ -48,7 +48,11 @@ async fn scrub_redacts_an_existing_secret_in_place_with_the_memorys_model() {
     let e5 = EmbeddingModel::MultilingualE5Small;
     support::memory_of(e5, &["给表加上索引"], &home::memory_dir()).await;
     let session = "scrub-session-0001";
-    support::write_session(source.path(), session, &[format!("部署密钥：\n{key}")]);
+    support::write_session(
+        source.path(),
+        session,
+        &[format!("部署密钥：\n{key}"), format!("{key}{}", " clean".repeat(500))],
+    );
 
     // Index with a no-op scanner so the secret lands in the memory unredacted.
     std::env::set_var("FUNES_TRUFFLEHOG", "/usr/bin/true");
@@ -70,6 +74,54 @@ async fn scrub_redacts_an_existing_secret_in_place_with_the_memorys_model() {
 
     // Scrub with the real scanner: it must redact the key in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
+    // Both turns contain the key. Only a clean trailing split in the second turn is unreceipted.
+    let uri = dataset::table_uri(&memdir);
+    let open = || dataset::open(&uri, Default::default());
+    let before = open().await.unwrap();
+    let rows = dataset::scan_rows(&before, &[], None, None).await.unwrap();
+    let chunks = dataset::chunks(&rows);
+    let missing = chunks
+        .iter()
+        .filter(|c| c.session_id == session && c.seq == 1)
+        .max_by_key(|c| c.split_idx)
+        .unwrap();
+    assert!(missing.split_idx > 0 && !missing.text.contains(&key_body));
+    let ids = chunks
+        .iter()
+        .filter(|c| c.id != missing.id)
+        .map(|c| c.id.as_str())
+        .collect::<Vec<_>>();
+    std::fs::create_dir_all(home::pushed_dir()).unwrap();
+    std::fs::write(home::pushed_dir().join("hf___datasets_test_memory"), ids.join("\n")).unwrap();
+    let covered = "session_id = 'scrub-session-0001' AND seq = 0";
+    let covered_rows = dataset::scan_rows_with_ids(&before, &["id"], Some(covered))
+        .await
+        .unwrap();
+    let address = dataset::row_ids(&covered_rows[0]).unwrap().get(0);
+    funes::commands::scrub::run_pending("test/memory").await.unwrap();
+    let after = open().await.unwrap();
+    assert_eq!(after.version().version, before.version().version + 1);
+    let covered_rows = dataset::scan_rows_with_ids(&after, &["id"], Some(covered))
+        .await
+        .unwrap();
+    assert_eq!(dataset::row_ids(&covered_rows[0]).unwrap().get(0), address);
+    let rows = dataset::chunks(
+        &dataset::scan_rows(&after, &[], Some("session_id = 'scrub-session-0001'"), None)
+            .await
+            .unwrap(),
+    );
+    assert!(rows.iter().any(|c| c.seq == 0 && c.text.contains(&key_body)));
+    assert!(rows
+        .iter()
+        .any(|c| c.seq == 1 && c.text.contains("[REDACTED:PrivateKey]")));
+    assert!(!rows.iter().any(|c| c.seq == 1 && c.text.contains(&key_body)));
+    assert!(
+        !rows.iter().any(|c| c.id == missing.id),
+        "the obsolete last split survived"
+    );
+    funes::commands::scrub::run_pending("test/memory").await.unwrap();
+    assert_eq!(open().await.unwrap().version().version, after.version().version);
+
     funes::commands::scrub::run().await.unwrap();
     let clean = recall::get(Memory::local(), session.into(), TurnRange::default())
         .await

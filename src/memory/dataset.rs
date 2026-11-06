@@ -22,7 +22,8 @@ use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::optimize::{compact_files, plan_compaction, CompactionOptions};
 use lance::dataset::scanner::Scanner;
 use lance::dataset::{
-    Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched, WriteMode, WriteParams, ROW_ID,
+    Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched, WhenNotMatchedBySource, WriteMode,
+    WriteParams, ROW_ID,
 };
 use lance::index::vector::VectorIndexParams;
 use lance::index::{DatasetIndexExt, DatasetIndexInternalExt};
@@ -223,6 +224,73 @@ pub async fn take_rows(ds: &Dataset, row_ids: &[u64], columns: &[&str]) -> Resul
         ds.schema().project(columns)?
     };
     ds.take_rows(row_ids, projection).await.context("reading rows by id")
+}
+
+/// Select every row in a block that has at least one chunk id absent from `pushed`.
+/// The returned rows omit vectors; callers that repair them will rebuild those columns.
+pub(crate) async fn pending_block_rows(ds: &Dataset, pushed: &HashSet<String>) -> Result<Vec<RecordBatch>> {
+    let keys = scan_rows_with_ids(ds, &["id", "session_id", "turn_uuid", "block_idx"], None).await?;
+    let mut blocks = HashMap::new();
+    for batch in &keys {
+        let (ids, sessions, turns) = (strs(batch, "id"), strs(batch, "session_id"), strs(batch, "turn_uuid"));
+        let (indices, addresses) = (ints(batch, "block_idx"), row_ids(batch)?);
+        for i in 0..batch.num_rows() {
+            let key = (sessions.get(i), turns.get(i), indices.get(i));
+            let (pending, rows) = blocks.entry(key).or_insert_with(|| (false, Vec::new()));
+            *pending |= !pushed.contains(ids.get(i));
+            rows.push(addresses.get(i));
+        }
+    }
+    let mut rows: Vec<_> = blocks
+        .into_values()
+        .filter(|(pending, _)| *pending)
+        .flat_map(|(_, rows)| rows)
+        .collect();
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    rows.sort_unstable();
+    let columns: Vec<_> = ds
+        .schema()
+        .fields
+        .iter()
+        .filter(|f| f.name != "vector")
+        .map(|f| f.name.as_str())
+        .collect();
+    Ok(vec![take_rows(ds, &rows, &columns).await?])
+}
+
+/// Replace only the supplied chunk ids in one targeted Lance merge. Rows absent from
+/// `replacements` are deleted; all other local rows remain untouched.
+pub(crate) async fn replace_scrubbed(
+    ds: &Dataset,
+    dirty_ids: &[&str],
+    replacements: Option<RecordBatch>,
+) -> Result<()> {
+    let schema = schema_of(ds);
+    let batch = match replacements {
+        Some(batch) => {
+            // Older memories may lack a column in today's chunk schema.
+            let columns = schema
+                .fields()
+                .iter()
+                .map(|f| batch.schema_ref().index_of(f.name()))
+                .collect::<Result<Vec<_>, _>>()?;
+            batch.project(&columns)?
+        }
+        None => RecordBatch::new_empty(schema),
+    };
+    let delete_if = WhenNotMatchedBySource::delete_if(ds, &in_list("id", dirty_ids.iter().copied()))?;
+    MergeInsertBuilder::try_new(Arc::new(ds.clone()), vec!["id".to_string()])?
+        .when_matched(WhenMatched::update_if(ds, "source.text != target.text")?)
+        .when_not_matched(WhenNotMatched::InsertAll)
+        .when_not_matched_by_source(delete_if)
+        .write_mode(MergeInsertWriteMode::RewriteRows)
+        .try_build()?
+        .execute_batches(vec![batch])
+        .await
+        .context("replacing scrubbed rows")?;
+    Ok(())
 }
 
 /// How many rows `filter` keeps (all rows for `None`).
