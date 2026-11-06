@@ -225,9 +225,8 @@ fn replacement_ids(replacements: &RecordBatch, keys: &HashSet<BlockKey>) -> Resu
 
 fn stamp_replacements_with_current_schema(ds: &Dataset, replacements: RecordBatch) -> Result<RecordBatch> {
     let target = Arc::new(Schema::from(ds.schema()));
-    if replacements.num_columns() != target.fields().len() {
-        bail!("replacement rows must use the complete current memory schema");
-    }
+    // A source built by this version can carry newer fields (harness, repo) that an older local
+    // memory lacks. The merge needs every target field, in target order.
     let source_schema = replacements.schema();
     let mut columns = Vec::with_capacity(target.fields().len());
     for field in target.fields() {
@@ -419,6 +418,28 @@ mod tests {
         let result = replace_blocks(&ds, &keys, &originals, replacements).await.unwrap();
         assert_eq!(result.count_rows(None).await.unwrap(), 1);
         assert_eq!(result.count_rows(Some("id = 'clean-0'".into())).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn repairs_memory_from_before_the_provenance_columns() {
+        let dir = tempdir().unwrap();
+        let uri = dir.path().join("chunks.lance").to_string_lossy().into_owned();
+        let original = batch(&[("id", "secret", "session", "turn", 0, 0, [1.0, 0.0])]);
+        let ds = Dataset::write(reader(original), &uri, None).await.unwrap();
+        let keys = [BlockKey::new("session", "turn", 0)];
+        let originals = read_blocks(&ds, &keys).await.unwrap();
+        let repaired = batch(&[("id", "redacted", "session", "turn", 0, 0, [0.0, 1.0])]);
+        let mut fields = repaired.schema().fields().to_vec();
+        let mut columns = repaired.columns().to_vec();
+        for name in ["harness", "repo"] {
+            fields.push(Arc::new(Field::new(name, DataType::Utf8, true)));
+            columns.push(Arc::new(StringArray::from(vec![""])));
+        }
+        let replacements = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+
+        let result = replace_blocks(&ds, &keys, &originals, replacements).await.unwrap();
+        assert_eq!(result.schema(), ds.schema());
+        assert_eq!(result.count_rows(Some("text = 'redacted'".into())).await.unwrap(), 1);
     }
 
     #[tokio::test]
