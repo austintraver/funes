@@ -60,8 +60,10 @@ pub async fn run(spec: &str) -> Result<String> {
             redacted += plan.redacted_blocks;
             dropped += plan.dropped_blocks;
         }
-        held::remove(&uri, &keys.iter().cloned().collect())?;
     }
+    // The push lock keeps this worklist stable. On interruption, a retry sees any previously
+    // repaired blocks as clean or absent.
+    held::clear(&uri)?;
     Ok(format!(
         "{uri}: swab checked {} withheld block(s) ({scanned_rows} local rows); redacted {redacted}, dropped {dropped}",
         queued.len()

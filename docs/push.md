@@ -79,8 +79,9 @@ Run `funes swab <memory>` once a day for the memory that push targets. Push can 
 session boundaries throughout the day: it keeps withholding secret-bearing rows and adds their block
 coordinates to a per-remote local worklist. The worklist stores no block text or scanner findings.
 Repeated pushes merge new keys into it, including pushes limited by `--sessions`. A swab and a push
-to the same remote take the same lock, so a swab drains a stable set of keys. A failed or interrupted
-swab leaves unprocessed keys available for retry.
+to the same remote take the same lock, so a swab drains a stable set of keys. It clears the worklist
+when the last batch succeeds. If interrupted, the next swab reads the worklist again; blocks already
+repaired need no further write.
 
 To seed the worklist with rows held before this worklist existed, run `funes push <memory>` once. The
 push gate scans the rows still pending for that remote and records any blocks it holds back.
@@ -92,10 +93,10 @@ replaced with a `[REDACTED:<detector>]` marker, then that block is re-chunked an
 chunks are re-embedded. If a finding cannot be reconstructed safely, or the redacted block does not
 scan clean, swab drops the block. Clean rows outside the queued blocks are not scanned or rewritten.
 
-The replacement is one targeted Lance commit for the queued blocks. Swab removes obsolete split ids
+Each batch with dirty blocks makes one targeted Lance commit. Swab removes obsolete split ids
 from the current memory and records them so a later transcript re-index cannot restore their original
-text. Once the repair succeeds, swab retires those block keys from the worklist. The next ordinary
-`funes push <memory>` can publish the repaired rows that the gate previously held back.
+text. The next ordinary `funes push <memory>` can publish the repaired rows that the gate previously
+held back.
 
 Swab changes what is publishable in the **current local memory**; it does not retract data already
 published to the Hub. It also does not immediately remove prior local Lance versions from disk. The

@@ -240,6 +240,11 @@ async fn swab_repairs_only_queued_splits_after_small_fragment_compaction() {
     );
 
     let repaired_version = repaired.version().version;
+    // An interrupted swab can commit its repair before retiring the worklist. Replaying that
+    // snapshot must leave the repaired dataset version alone and finish draining the queue.
+    held::add(REMOTE, [block]).unwrap();
+    let replay = swab::run(REMOTE).await.unwrap();
+    assert!(replay.contains("redacted 0, dropped 0"), "{replay}");
     let empty_report = swab::run(REMOTE).await.unwrap();
     assert!(empty_report.contains("no withheld blocks queued"), "{empty_report}");
     let after_empty_swab = dataset::open(&dataset::table_uri(home::memory_dir()), Default::default())
@@ -248,7 +253,7 @@ async fn swab_repairs_only_queued_splits_after_small_fragment_compaction() {
     assert_eq!(
         after_empty_swab.version().version,
         repaired_version,
-        "an empty swab creates no dataset version"
+        "replaying a repaired block and draining an empty queue create no dataset version"
     );
     let repaired_key_rows = dataset::scan_rows(&repaired, &[], Some(key_filter), None)
         .await

@@ -1,13 +1,15 @@
 //! Targeted Lance replacement for blocks repaired by the daily secret swab.
 //!
-//! A replacement uses the deterministic chunk `id` as its key. Lance's `RewriteRows` merge writes
+//! A replacement uses the deterministic chunk `id` as its key. Lance's [`RewriteRows`] merge writes
 //! only matched replacement rows and inserts new splits; a block-scoped `DeleteIf` removes old
 //! splits that no longer exist. The three actions commit as one dataset version.
+//!
+//! [`RewriteRows`]: https://github.com/lance-format/lance/blob/0923349baa19fd9af776b7d4626dc758dc610c80/rust/lance/src/dataset/write/merge_insert.rs#L427-L447
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use arrow_array::{Array, FixedSizeListArray, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::Schema;
 use futures::TryStreamExt;
@@ -20,12 +22,12 @@ use super::dataset::{ints, strs};
 use super::held::BlockKey;
 
 const MAX_KEYS_PER_SCAN: usize = 64;
-const ROW_ADDR: &str = "_rowaddr";
 
-/// Read all current rows for `keys`, preserving physical row addresses for the read snapshot.
+/// Read all current rows for `keys` from the dataset snapshot.
 ///
 /// A caller can pass larger worklists; this issues separate scans with at most 64 block keys each.
-/// Rows are returned in Arrow batches and retain the dataset schema plus `_rowaddr`.
+/// Matching rows are returned with every current field except `vector`. The vector is rebuilt for
+/// repaired chunks, so the old vector payload is not loaded.
 pub async fn read_blocks(ds: &Dataset, keys: &[BlockKey]) -> Result<Vec<RecordBatch>> {
     let columns = vec![
         "session_id".to_string(),
@@ -59,8 +61,15 @@ pub async fn read_blocks(ds: &Dataset, keys: &[BlockKey]) -> Result<Vec<RecordBa
             row_ids.extend((0..ids.len()).map(|row| ids.value(row)));
         }
         if !row_ids.is_empty() {
-            let mut take = Arc::new(ds.clone()).take_builder(&row_ids, Arc::new(ds.schema().clone()))?;
-            take = take.with_row_address(true);
+            let payload_columns = ds
+                .schema()
+                .fields
+                .iter()
+                .filter(|field| field.name != "vector")
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>();
+            let projection = ds.schema().project(&payload_columns)?;
+            let take = Arc::new(ds.clone()).take_builder(&row_ids, Arc::new(projection))?;
             batches.push(take.execute().await.context("loading selected dirty memory rows")?);
         }
     }
@@ -121,6 +130,9 @@ pub async fn replace_blocks(
         );
     }
 
+    // We commit separately to check row counts first. Forward the same conflict information as
+    // Lance's own merge commit:
+    // https://github.com/lance-format/lance/blob/0923349baa19fd9af776b7d4626dc758dc610c80/rust/lance/src/dataset/write/merge_insert.rs#L3338-L3351
     let mut commit = CommitBuilder::new(Arc::new(ds.clone()));
     if let Some(affected_rows) = pending.affected_rows {
         commit = commit.with_affected_rows(affected_rows);
@@ -175,9 +187,6 @@ fn key_at(batch: &RecordBatch, row: usize) -> Result<BlockKey> {
 fn original_ids(originals: &[RecordBatch], keys: &HashSet<BlockKey>) -> Result<HashSet<String>> {
     let mut ids = HashSet::new();
     for batch in originals {
-        if batch.column_by_name(ROW_ADDR).is_none() {
-            bail!("original block rows must include their snapshot's _rowaddr values");
-        }
         let batch_ids = strs(batch, "id");
         for row in 0..batch.num_rows() {
             let key = key_at(batch, row)?;
@@ -294,7 +303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_only_requested_blocks_and_includes_addresses() {
+    async fn reads_only_requested_block_rows_without_vectors_or_addresses() {
         let dir = tempdir().unwrap();
         let uri = dir.path().join("chunks.lance").to_string_lossy().into_owned();
         let initial = batch(&[
@@ -325,8 +334,16 @@ mod tests {
 
         let blocks = read_blocks(&ds, &keys).await.unwrap();
         assert_eq!(blocks.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
-        assert!(blocks.iter().all(|batch| batch.column_by_name(ROW_ADDR).is_some()));
-        assert_eq!(strs(&blocks[0], "id").get(0), "a");
+        assert!(blocks.iter().all(|batch| batch.column_by_name("vector").is_none()));
+        assert!(blocks.iter().all(|batch| batch.column_by_name("_rowaddr").is_none()));
+        let found_ids = blocks
+            .iter()
+            .flat_map(|batch| {
+                let ids = strs(batch, "id");
+                (0..batch.num_rows()).map(move |row| ids.get(row).to_string())
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(found_ids, HashSet::from(["a".to_string(), "b".to_string()]));
     }
 
     #[tokio::test]

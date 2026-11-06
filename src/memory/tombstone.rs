@@ -13,11 +13,10 @@ pub fn load() -> Result<HashSet<String>> {
 }
 
 fn load_at(path: &Path) -> Result<HashSet<String>> {
-    if !path.exists() {
-        return Ok(HashSet::new());
-    }
-    let contents =
-        std::fs::read_to_string(path).with_context(|| format!("reading suppressed chunk ids at {}", path.display()))?;
+    let contents = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        result => result.with_context(|| format!("reading suppressed chunk ids at {}", path.display()))?,
+    };
     let mut ids = HashSet::new();
     for (line_no, line) in contents.lines().enumerate() {
         if line.is_empty() {
@@ -35,10 +34,18 @@ fn load_at(path: &Path) -> Result<HashSet<String>> {
 /// the commit fails, the old dirty row stays stored and push-gated, while its source cannot be
 /// re-added as a second copy.
 pub fn record(ids: impl IntoIterator<Item = String>) -> Result<()> {
+    let mut ids = ids.into_iter().peekable();
+    if ids.peek().is_none() {
+        return Ok(());
+    }
     let path = home::suppressed_chunks_file();
     let mut all = load()?;
+    let before = all.len();
     all.extend(ids);
-    write_at(&path, &all)
+    if all.len() != before {
+        write_at(&path, &all)?;
+    }
+    Ok(())
 }
 
 fn write_at(path: &Path, ids: &HashSet<String>) -> Result<()> {
@@ -79,5 +86,14 @@ mod tests {
         let path = dir.path().join("suppressed");
         std::fs::write(&path, "not-an-id\n").unwrap();
         assert!(load_at(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_suppression_path_is_not_an_empty_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("state");
+        std::fs::write(&parent, b"").unwrap();
+        assert!(load_at(&parent.join("suppressed")).is_err());
     }
 }

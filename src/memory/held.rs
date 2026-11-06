@@ -1,19 +1,22 @@
 //! Per-remote worklist of blocks held back by the push secret gate.
 //!
 //! Entries contain only transcript coordinates, never row text or scanner findings. Push and
-//! swab serialize changes with the existing per-remote push lock; writes here replace the worklist
-//! atomically so an interrupted update leaves the previous complete list.
+//! swab serialize changes with the existing per-remote push lock. [Persisting the temporary file]
+//! atomically replaces the worklist, so readers see either the old list or the new one.
+//!
+//! [Persisting the temporary file]: https://docs.rs/tempfile/3.27.0/tempfile/struct.NamedTempFile.html#method.persist
 
 use crate::home;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 
 /// Stable coordinates identifying one block in a session transcript.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct BlockKey {
     pub session_id: String,
     pub turn_uuid: String,
@@ -31,26 +34,17 @@ impl BlockKey {
 }
 
 fn path(memory_uri: &str) -> PathBuf {
-    home::pushed_dir().join("held").join(sanitize(memory_uri))
-}
-
-fn sanitize(uri: &str) -> String {
-    uri.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    // A slash and a literal underscore can distinguish two Hub targets.
+    home::pushed_dir()
+        .join("held")
+        .join(hex::encode(Sha256::digest(memory_uri)))
 }
 
 fn load_at(path: &Path) -> Result<HashSet<BlockKey>> {
-    if !path.exists() {
-        return Ok(HashSet::new());
-    }
-    let file = File::open(path).with_context(|| format!("opening held-block worklist at {}", path.display()))?;
+    let file = match File::open(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        result => result.with_context(|| format!("opening held-block worklist at {}", path.display()))?,
+    };
     let mut keys = HashSet::new();
     for (line_no, line) in BufReader::new(file).lines().enumerate() {
         let line = line.with_context(|| format!("reading held-block worklist at {}", path.display()))?;
@@ -73,9 +67,7 @@ fn write_at(path: &Path, keys: &HashSet<BlockKey>) -> Result<()> {
     let dir = path.parent().context("held-block worklist has no parent directory")?;
     std::fs::create_dir_all(dir).context("creating the held-block worklist directory")?;
     let mut ordered: Vec<_> = keys.iter().collect();
-    ordered.sort_unstable_by(|a, b| {
-        (&a.session_id, &a.turn_uuid, a.block_idx).cmp(&(&b.session_id, &b.turn_uuid, b.block_idx))
-    });
+    ordered.sort_unstable();
     let mut temp = tempfile::NamedTempFile::new_in(dir).context("creating a held-block worklist")?;
     for key in ordered {
         serde_json::to_writer(&mut temp, key).context("serializing a held-block key")?;
@@ -94,20 +86,18 @@ pub fn add(memory_uri: &str, additions: impl IntoIterator<Item = BlockKey>) -> R
 
 fn add_at(path: &Path, additions: impl IntoIterator<Item = BlockKey>) -> Result<()> {
     let mut keys = load_at(path)?;
+    let before = keys.len();
     keys.extend(additions);
+    if keys.len() == before {
+        return Ok(());
+    }
     write_at(path, &keys)
 }
 
-/// Retire blocks swab successfully classified and repaired. Caller holds the matching remote's
-/// push lock so no in-flight push can add a newer finding while these keys are removed.
-pub fn remove(memory_uri: &str, retired: &HashSet<BlockKey>) -> Result<()> {
-    remove_at(&path(memory_uri), retired)
-}
-
-fn remove_at(path: &Path, retired: &HashSet<BlockKey>) -> Result<()> {
-    let mut keys = load_at(path)?;
-    keys.retain(|key| !retired.contains(key));
-    write_at(path, &keys)
+/// Retire the complete worklist after the last batch succeeds, still under the remote's push lock.
+pub fn clear(memory_uri: &str) -> Result<()> {
+    let path = path(memory_uri);
+    std::fs::remove_file(&path).with_context(|| format!("retiring held-block worklist at {}", path.display()))
 }
 
 #[cfg(test)]
@@ -115,20 +105,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worklist_add_merges_and_remove_retires_only_selected_keys() {
+    fn worklist_merges_repeated_pushes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("held");
         let one = BlockKey::new("session-1", "turn-1", 0);
         let two = BlockKey::new("session-2", "turn-2", 1);
-        let three = BlockKey::new("session-3", "turn-3", 2);
 
         add_at(&path, [one.clone()]).unwrap();
-        add_at(&path, [two.clone()]).unwrap();
-        assert_eq!(load_at(&path).unwrap(), HashSet::from([one.clone(), two.clone()]));
+        add_at(&path, [one.clone(), two.clone()]).unwrap();
+        assert_eq!(load_at(&path).unwrap(), HashSet::from([one, two]));
+    }
 
-        remove_at(&path, &HashSet::from([one])).unwrap();
-        add_at(&path, [three.clone()]).unwrap();
-        assert_eq!(load_at(&path).unwrap(), HashSet::from([two, three]));
+    #[test]
+    fn distinct_hub_targets_have_distinct_worklists() {
+        assert_ne!(path("hf://datasets/team/run_1"), path("hf://datasets/team_run/1"));
     }
 
     #[test]
