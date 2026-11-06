@@ -48,7 +48,7 @@ One publish per memory at a time on a machine: a push that starts while another 
 says so and stops, and the next one picks up what it left. The hooks [`funes add`](add.md) installs
 run this at session boundaries automatically; see [automation.md](automation.md).
 
-## Keeping secrets out: the push gate, `swab`, and `scrub`
+## Keeping secrets out: the push gate, `funes swab`, and `funes scrub`
 
 When TruffleHog is available, indexing redacts detected credentials before storing a session. That
 first pass is best-effort: local indexing still works without the scanner because the local memory
@@ -72,6 +72,8 @@ $ echo $?
 
 A hold-back is easy to miss when the hooks push in the background, so `funes status` scans this
 host's pending rows for the bound memory the same way and reports what a push would hold back.
+
+`funes push`, `funes swab`, and `funes scrub` require TruffleHog when they have rows to scan. See the [TruffleHog installation instructions](https://github.com/trufflesecurity/trufflehog#installation). Funes checks [`FUNES_TRUFFLEHOG`](configuration.md#environment-reference) first, then `PATH`, then common install directories.
 
 ### What `funes swab` changes
 
@@ -114,11 +116,6 @@ operation guarantees that deleted bytes in a live fragment have been physically 
 Neither swab nor scrub edits source transcripts or changes an already-published remote. If a live
 credential reached the Hub, revoke or rotate it first, then remediate the remote dataset separately;
 the push gate prevents later uploads but does not automate remote deletion.
-
-`funes push`, `funes swab`, and `funes scrub` refuse to run unscanned when TruffleHog is unavailable.
-See the [upstream installation documentation](https://github.com/trufflesecurity/trufflehog#installation).
-funes looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`; see
-[configuration.md](configuration.md#environment-reference).
 
 ## Publishing a selection: `--sessions`
 
