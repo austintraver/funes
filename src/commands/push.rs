@@ -3,7 +3,7 @@
 //! Streamed, never a full mirror. "What's already there" is the memory's own chunk ids, so the
 //! delta is `embedded_local_ids − remote_ids`. `push` is orchestration:
 //! it computes the delta, holds back any row that still contains a secret (redaction happens at
-//! index time; this is the egress backstop — the rows wait for `funes swab`), and drives the HF
+//! index time; this is the egress backstop — either `funes swab` or `funes scrub` can repair them), and drives the HF
 //! write operations in [`crate::memory::remote`], which own the atomic, parent-commit-guarded commits.
 //!
 //! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file in
@@ -416,7 +416,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let batches = dataset::restamped(&schema, rows)?;
 
     // Drop any row whose text still holds a secret — hold it back from the Hub rather than block the
-    // whole push. `funes swab` repairs queued blocks in the local memory; a later push can ship them.
+    // whole push. `funes swab` repairs queued blocks; `funes scrub` checks the whole local memory.
     let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
     let (batches, skipped) = drop_secret_rows(batches)?;
