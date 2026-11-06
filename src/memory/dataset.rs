@@ -226,30 +226,8 @@ pub async fn take_rows(ds: &Dataset, row_ids: &[u64], columns: &[&str]) -> Resul
     ds.take_rows(row_ids, projection).await.context("reading rows by id")
 }
 
-/// Select every row in a block that has at least one chunk id absent from `pushed`.
-/// The returned rows omit vectors; callers that repair them will rebuild those columns.
-pub(crate) async fn pending_block_rows(ds: &Dataset, pushed: &HashSet<String>) -> Result<Vec<RecordBatch>> {
-    let keys = scan_rows_with_ids(ds, &["id", "session_id", "turn_uuid", "block_idx"], None).await?;
-    let mut blocks = HashMap::new();
-    for batch in &keys {
-        let (ids, sessions, turns) = (strs(batch, "id"), strs(batch, "session_id"), strs(batch, "turn_uuid"));
-        let (indices, addresses) = (ints(batch, "block_idx"), row_ids(batch)?);
-        for i in 0..batch.num_rows() {
-            let key = (sessions.get(i), turns.get(i), indices.get(i));
-            let (pending, rows) = blocks.entry(key).or_insert_with(|| (false, Vec::new()));
-            *pending |= !pushed.contains(ids.get(i));
-            rows.push(addresses.get(i));
-        }
-    }
-    let mut rows: Vec<_> = blocks
-        .into_values()
-        .filter(|(pending, _)| *pending)
-        .flat_map(|(_, rows)| rows)
-        .collect();
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-    rows.sort_unstable();
+/// Read the selected rows without loading their embeddings.
+pub(crate) async fn take_rows_without_vectors(ds: &Dataset, rows: &[u64]) -> Result<RecordBatch> {
     let columns: Vec<_> = ds
         .schema()
         .fields
@@ -257,11 +235,12 @@ pub(crate) async fn pending_block_rows(ds: &Dataset, pushed: &HashSet<String>) -
         .filter(|f| f.name != "vector")
         .map(|f| f.name.as_str())
         .collect();
-    Ok(vec![take_rows(ds, &rows, &columns).await?])
+    take_rows(ds, rows, &columns).await
 }
 
-/// Replace only the supplied chunk ids in one targeted Lance merge. Rows absent from
-/// `replacements` are deleted; all other local rows remain untouched.
+/// Commit the repairs for a set of dirty blocks. Re-splitting can reuse a chunk id, create one,
+/// or retire one. Update reused ids only if their text changed, insert new ids, and delete only
+/// original ids from these blocks that have no replacement.
 pub(crate) async fn replace_scrubbed(
     ds: &Dataset,
     dirty_ids: &[&str],

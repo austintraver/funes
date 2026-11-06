@@ -10,11 +10,13 @@ use crate::memory::{lock, receipt};
 use crate::{chunk, scan, ui};
 use anyhow::{bail, Context, Result};
 use lance::Dataset;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::time::Instant;
 
-/// Reconstruct each block, scan them all in one pass, and for any block holding a secret either
+/// Scrub every local block, or, with `pending`, only those not fully covered by the remote's push receipt.
+/// Reconstruct the selected blocks, scan them in one pass, and for any block holding a secret either
 /// redact the matching values in place (re-chunked, re-embedded) or — when a value can't be matched
 /// (e.g. a key stored with escaped `\n`), or the redaction doesn't scan clean — drop the block
 /// whole. Fail-closed on the scanner: scrubbing is the whole point.
@@ -31,13 +33,11 @@ pub async fn run(pending: Option<&str>) -> Result<()> {
     };
     let model = dataset::embedding_model(&ds)?;
     let batches = if let Some(remote) = remote.as_deref() {
-        let pushed = receipt::load(remote).with_context(|| format!("no readable push receipt for {remote}"))?;
-        let rows = dataset::pending_block_rows(&ds, &pushed).await?;
-        if rows.iter().all(|b| b.num_rows() == 0) {
+        let Some(rows) = pending_block_rows(&ds, remote).await? else {
             println!("no pending blocks to scrub");
             return Ok(());
-        }
-        rows
+        };
+        vec![rows]
     } else {
         eprintln!("loading the local memory…");
         dataset::scan_rows(&ds, &[], None, None).await?
@@ -144,6 +144,37 @@ pub async fn run(pending: Option<&str>) -> Result<()> {
     }
     println!("{msg}");
     Ok(())
+}
+
+/// A receipt covers a block only when it contains every split. Select by identifiers first so
+/// fully covered blocks never have their text or vectors loaded for scanning.
+async fn pending_block_rows(ds: &Dataset, remote: &str) -> Result<Option<dataset::RecordBatch>> {
+    let pushed = receipt::load(remote).with_context(|| format!("no readable push receipt for {remote}"))?;
+    let keys = dataset::scan_rows_with_ids(ds, &["id", "session_id", "turn_uuid", "block_idx"], None).await?;
+    let mut blocks = HashMap::new();
+    for batch in &keys {
+        let ids = dataset::strs(batch, "id");
+        let sessions = dataset::strs(batch, "session_id");
+        let turns = dataset::strs(batch, "turn_uuid");
+        let indices = dataset::ints(batch, "block_idx");
+        let addresses = dataset::row_ids(batch)?;
+        for i in 0..batch.num_rows() {
+            let key = (sessions.get(i), turns.get(i), indices.get(i));
+            let (pending, rows) = blocks.entry(key).or_insert_with(|| (false, Vec::new()));
+            *pending |= !pushed.contains(ids.get(i));
+            rows.push(addresses.get(i));
+        }
+    }
+    let mut rows: Vec<_> = blocks
+        .into_values()
+        .filter(|(pending, _)| *pending)
+        .flat_map(|(_, rows)| rows)
+        .collect();
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    rows.sort_unstable();
+    Ok(Some(dataset::take_rows_without_vectors(ds, &rows).await?))
 }
 
 /// Overwrite the local memory with the retained rows and replacements, rebuild its indexes,
