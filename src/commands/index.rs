@@ -11,15 +11,16 @@
 use super::compact;
 use crate::chunk::{self, Tier};
 use crate::home;
-use crate::inference::{self, embed_batched, Embedder};
+use crate::inference::{self, Embedder, embed_batched};
+use crate::memory::Memory;
 use crate::memory::dataset::{self, build_batch, model};
 use crate::memory::lock;
-use crate::memory::Memory;
+use crate::memory::tombstone;
 use crate::scan;
 use crate::traces::spool;
 use crate::traces::{self, repo, source};
 use crate::ui::prompt::confirm;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use lance::Dataset;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -467,6 +468,8 @@ struct Indexer {
     ds: Option<Dataset>,
     /// [`stored_ids`] at open plus everything written this run — the dedup baseline for new chunks.
     existing: HashSet<String>,
+    /// Removed source chunk ids; prevents a later spool sweep from restoring their original text.
+    suppressed: HashSet<String>,
     embedder: Box<dyn Embedder>,
     scanner: Option<scan::Trufflehog>,
     include_thinking: bool,
@@ -497,6 +500,21 @@ struct Indexer {
     /// Units (by index) whose read failed this run — reported once. Signed units also keep their
     /// refusal in state until their content or this build changes.
     rejected: HashSet<usize>,
+}
+
+/// Keep source chunks that are neither present in memory nor permanently suppressed after a
+/// targeted swab. A source re-emission can contain old split coordinates that the redacted block no
+/// longer needs; the tombstone set prevents those ids from restoring their original text.
+fn chunks_to_add(
+    chunks: impl IntoIterator<Item = chunk::Chunk>,
+    existing: &HashSet<String>,
+    suppressed: &HashSet<String>,
+) -> Vec<chunk::Chunk> {
+    let mut in_batch = HashSet::new();
+    chunks
+        .into_iter()
+        .filter(|c| !existing.contains(&c.id) && !suppressed.contains(&c.id) && in_batch.insert(c.id.clone()))
+        .collect()
 }
 
 /// Enumerate every source's units (each source orders its own — recency-desc), tagged with the
@@ -588,10 +606,12 @@ impl Indexer {
         retire_vanished_units(&coverage_path, &sources)?;
         write_index_coverage(&coverage_path, &sources, &units, &state)?;
 
+        let suppressed = tombstone::load()?;
         Ok(Indexer {
             uri,
             ds,
             existing,
+            suppressed,
             embedder,
             scanner,
             include_thinking: !no_thinking,
@@ -725,13 +745,7 @@ impl Indexer {
             eprintln!("{progress} {label} — no indexable content");
             0
         } else {
-            // A unit can carry one id twice (a turn re-emitted under its `turn_uuid`); the first wins,
-            // as it would have had the two arrived in separate runs.
-            let mut in_batch = HashSet::new();
-            let new_chunks: Vec<chunk::Chunk> = chunks
-                .into_iter()
-                .filter(|c| !self.existing.contains(&c.id) && in_batch.insert(c.id.clone()))
-                .collect();
+            let new_chunks = chunks_to_add(chunks, &self.existing, &self.suppressed);
             if new_chunks.is_empty() {
                 eprintln!("{progress} {label} — {total_chunks} chunks, all already indexed");
                 0
@@ -1325,6 +1339,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn indexer_never_readds_tombstoned_chunk_ids() {
+        let make = |id: &str| chunk::Chunk {
+            id: id.into(),
+            text: format!("source {id}"),
+            session_id: "session".into(),
+            workdir: String::new(),
+            turn_uuid: "turn".into(),
+            parent_uuid: None,
+            seq: 0,
+            ts: "2026-01-01T00:00:00Z".into(),
+            role: "assistant".into(),
+            block_type: "text".into(),
+            tool_name: None,
+            source_path: String::new(),
+            block_idx: 0,
+            split_idx: 0,
+            harness: "test".into(),
+            repo: String::new(),
+        };
+        let chunks = vec![make("present"), make("removed"), make("new"), make("new")];
+        let existing = HashSet::from(["present".into()]);
+        let suppressed = HashSet::from(["removed".into()]);
+        let added = chunks_to_add(chunks, &existing, &suppressed);
+        assert_eq!(added.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["new"]);
+    }
+
     async fn unembedded_memory(path: &Path, tiers: &[(&str, usize)]) -> Dataset {
         let chunks: Vec<chunk::Chunk> = tiers
             .iter()
@@ -1397,11 +1438,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((embedded, checks), (2, vec![1, 2]));
-        assert!(pending_embeddings(&ds)
-            .await
-            .unwrap()
-            .by_tier
-            .contains_key(&Tier::ToolResult));
+        assert!(
+            pending_embeddings(&ds)
+                .await
+                .unwrap()
+                .by_tier
+                .contains_key(&Tier::ToolResult)
+        );
 
         let pending = pending_embeddings(&ds).await.unwrap();
         let embedded = embed_pending(&mut ds, &mut embedder, &pending, |_| {

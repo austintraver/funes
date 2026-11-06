@@ -3,7 +3,7 @@
 //! Streamed, never a full mirror. "What's already there" is the memory's own chunk ids, so the
 //! delta is `embedded_local_ids − remote_ids`. `push` is orchestration:
 //! it computes the delta, holds back any row that still contains a secret (redaction happens at
-//! index time; this is the egress backstop — the rows wait for `funes scrub`), and drives the HF
+//! index time; this is the egress backstop — the rows wait for `funes swab`), and drives the HF
 //! write operations in [`crate::memory::remote`], which own the atomic, parent-commit-guarded commits.
 //!
 //! - **First publish:** build the dataset locally (data + FTS/IVF indexes) and upload every file in
@@ -24,13 +24,14 @@ use super::compact;
 use crate::hub;
 use crate::memory::card::{self, CardAction, CardCtx};
 use crate::memory::dataset::{self, RecordBatch};
+use crate::memory::held::BlockKey;
 use crate::memory::lock;
 use crate::memory::receipt;
 use crate::memory::remote::{self, Appended, Compacted};
 use crate::memory::{Memory, MemoryState};
 use crate::ui::prompt::confirm;
 use crate::{chunk, scan, ui};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use chrono::Utc;
 use lance::Dataset;
@@ -229,7 +230,9 @@ pub async fn run(spec: &str, compact: bool, yes: bool, sessions: &[String]) -> R
 
 /// The error for a token the Hub lets read `label` but not write to.
 pub(crate) fn read_only_error(label: &str) -> anyhow::Error {
-    anyhow!("{label} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)")
+    anyhow!(
+        "{label} is read-only for your token — recall can read it, but publishing needs write access (check your HF token)"
+    )
 }
 
 /// The push confirmation for a target holding none of the chunks to publish. Fails closed (returns
@@ -419,16 +422,22 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
     let (batches, skipped) = drop_secret_rows(batches)?;
+    // Record only blocks the gate actually withheld. A selected --sessions push contributes only
+    // findings in that selection; held work from earlier pushes remains queued.
+    if !skipped.held_blocks.is_empty() {
+        crate::memory::held::add(&uri, skipped.held_blocks.iter().cloned())?;
+    }
     let n_chunks: usize = batches.iter().map(|b| b.num_rows()).sum();
     if n_chunks == 0 && skipped.rows > 0 {
         // Everything was held back: nothing reached the Hub. Mark `blocked` so the CLI exits non-zero
         // — automation must not read this as a successful publish.
         return Ok(Pushed {
             report: format!(
-                "{}: nothing published — held back {} row(s) with secrets ({}); run `funes scrub`, then push again\n",
+                "{}: nothing published — held back {} row(s) with secrets ({}); run `funes swab {}`, then push again\n",
                 target.label(),
                 skipped.rows,
-                skipped.summary
+                skipped.summary,
+                target.label()
             ),
             blocked: true,
         });
@@ -487,7 +496,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         return Ok(format!(
             "{}: {pushed} (commit {oid})\n{card_note}{}",
             target.label(),
-            skipped.warning()
+            skipped.warning(&target.label())
         )
         .into());
     }
@@ -539,7 +548,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
         eprintln!("compacting the remote…");
         out.push_str(&compact_auto(&w).await);
     }
-    out.push_str(&skipped.warning());
+    out.push_str(&skipped.warning(&target.label()));
     Ok(out.into())
 }
 
@@ -554,7 +563,7 @@ fn card_file(remote_readme: Result<Option<String>>, ctx: &CardCtx) -> (Option<St
             return (
                 None,
                 format!("  note: dataset card left untouched (couldn't read the current one: {e})\n"),
-            )
+            );
         }
     };
     match card::plan(existing.as_deref(), ctx) {
@@ -569,17 +578,19 @@ pub(crate) struct Skipped {
     pub rows: usize,
     /// Detectors that fired, e.g. `PrivateKey×1, AWS×2` — empty when nothing was held back.
     pub summary: String,
+    /// Stable coordinates of every block withheld by the gate, for a later targeted swab.
+    pub held_blocks: HashSet<BlockKey>,
 }
 
 impl Skipped {
     /// A loud trailing line for the push output, or empty if nothing was held back.
-    fn warning(&self) -> String {
+    fn warning(&self, memory: &str) -> String {
         if self.rows == 0 {
             return String::new();
         }
         format!(
-            "⚠ held back {} row(s) containing secrets ({}) — run `funes scrub` to redact them, then push again\n",
-            self.rows, self.summary
+            "⚠ held back {} row(s) containing secrets ({}) — run `funes swab {memory}` to repair them, then push again\n",
+            self.rows, self.summary,
         )
     }
 }
@@ -599,6 +610,7 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
             Skipped {
                 rows: 0,
                 summary: String::new(),
+                held_blocks: HashSet::new(),
             },
         ));
     }
@@ -611,6 +623,7 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
 
     let mut dirty = vec![false; chunks.len()];
     let mut detectors: Vec<String> = Vec::new();
+    let mut held_blocks = HashSet::new();
     for ((idxs, _), findings) in blocks.iter().zip(&found) {
         if findings.is_empty() {
             continue;
@@ -618,6 +631,12 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
         for &i in idxs {
             dirty[i] = true;
         }
+        let first = &chunks[idxs[0]];
+        held_blocks.insert(BlockKey::new(
+            first.session_id.clone(),
+            first.turn_uuid.clone(),
+            first.block_idx,
+        ));
         // One tally per (block, distinct detector), so the warning reads "PrivateKey×<blocks>".
         detectors.extend(scan::detectors(findings));
     }
@@ -628,6 +647,7 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
             Skipped {
                 rows: 0,
                 summary: String::new(),
+                held_blocks: HashSet::new(),
             },
         ));
     }
@@ -640,7 +660,14 @@ fn drop_secret_rows(batches: Vec<RecordBatch>) -> Result<(Vec<RecordBatch>, Skip
         base += b.num_rows();
     }
     let summary = scan::summary(detectors.iter().map(String::as_str));
-    Ok((clean, Skipped { rows: dropped, summary }))
+    Ok((
+        clean,
+        Skipped {
+            rows: dropped,
+            summary,
+            held_blocks,
+        },
+    ))
 }
 
 /// Best-effort compaction during a normal push: one attempt, never retried. The data is already
@@ -785,7 +812,7 @@ mod tests {
         assert!(note.contains("left untouched"), "note: {note}");
     }
 
-    use crate::traces::{Block, Turn, FORMAT_VERSION};
+    use crate::traces::{Block, FORMAT_VERSION, Turn};
     use std::process::Command;
 
     /// Mint a throwaway key (never committed, so funes ships no secret) of the given type, or None
@@ -865,6 +892,11 @@ mod tests {
         let (clean, skipped) = drop_secret_rows(vec![b]).unwrap();
         assert_eq!(skipped.rows, 1, "the escaped key must be held back, not pushed");
         assert!(skipped.summary.contains("PrivateKey"), "summary: {}", skipped.summary);
+        assert_eq!(
+            skipped.held_blocks,
+            HashSet::from([BlockKey::new("sess", "turn1", 0)]),
+            "the worklist records the block coordinates, not its contents"
+        );
         assert_eq!(
             clean.iter().map(|b| b.num_rows()).sum::<usize>(),
             1,
@@ -1026,11 +1058,18 @@ mod tests {
         let (clean, held) = drop_secret_rows(rows).unwrap();
         assert_eq!(held.rows, by_session["dirty"].len(), "every secret split is held");
         assert!(held.summary.contains("PrivateKey"), "summary: {}", held.summary);
+        assert_eq!(
+            held.held_blocks,
+            HashSet::from([BlockKey::new("dirty", "turn1", 0)]),
+            "one block key covers every secret split"
+        );
 
         let clean_only: HashSet<String> = by_session["clean"].iter().cloned().collect();
         assert_eq!(dataset::ids_in(&clean), clean_only, "unrelated clean rows survive");
         let rows = rows_with_ids(&ds, &clean_only).await.unwrap();
-        assert_eq!(drop_secret_rows(rows).unwrap().1.rows, 0, "clean rows are not held");
+        let clean_gate = drop_secret_rows(rows).unwrap().1;
+        assert_eq!(clean_gate.rows, 0, "clean rows are not held");
+        assert!(clean_gate.held_blocks.is_empty(), "clean rows add no worklist keys");
     }
 
     #[tokio::test]

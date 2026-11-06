@@ -39,43 +39,8 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    // Reconstruct each block's contiguous text (so a secret split() cut across chunks is whole) and
-    // scan them all in one pass.
-    let blocks = chunk::reconstruct_blocks(&chunks);
-    let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
-    eprintln!("scanning {} block(s) for secrets…", texts.len());
-    let found = scan::scan_blocks(&texts, &scanner)?;
-
-    // From that single scan, decide each block: excise the secrets whose value matches and re-chunk
-    // the result; if any can't be matched, the block can't be safely redacted, so drop it whole.
-    // `remove[i]` marks an original row to drop (its block had a secret); `replacements` are the
-    // re-chunked redacted blocks to re-embed.
-    let mut remove = vec![false; chunks.len()];
-    let mut replacements: Vec<chunk::Chunk> = Vec::new();
-    let mut redacted_detectors: Vec<String> = Vec::new();
-    let mut dropped_detectors: Vec<String> = Vec::new();
-    let (mut redacted_blocks, mut dropped_blocks, mut dropped_rows) = (0usize, 0usize, 0usize);
-    for ((idxs, text), findings) in blocks.iter().zip(&found) {
-        if findings.is_empty() {
-            continue;
-        }
-        for &i in idxs {
-            remove[i] = true;
-        }
-        let r = scan::excise(text, findings);
-        // Excising one match can expose another: removing it from a long base64 run re-aligns the
-        // window the next is found in. So a redaction counts only if the result scans clean.
-        let clean = r.fully_redacted && scan::scan_blocks(&[r.text.as_str()], &scanner)?[0].is_empty();
-        if clean {
-            replacements.extend(chunk::resplit(&chunks[idxs[0]], &r.text));
-            redacted_detectors.extend(r.removed_detectors);
-            redacted_blocks += 1;
-        } else {
-            dropped_detectors.extend(scan::detectors(findings));
-            dropped_blocks += 1;
-            dropped_rows += idxs.len();
-        }
-    }
+    let plan = plan(&chunks, &scanner)?;
+    let RepairPlan { ref remove, ref replacements, .. } = plan;
     if !remove.iter().any(|&r| r) {
         sweep(&ds).await?;
         println!("memory is already clean ({total} chunks)");
@@ -87,21 +52,8 @@ pub async fn run() -> Result<()> {
     let replacement_batch = if replacements.is_empty() {
         None
     } else {
-        let mut embedder: Box<dyn Embedder> = inference::embedder(model)?;
-        let rtexts: Vec<&str> = replacements.iter().map(|c| c.text.as_str()).collect();
-        let n = rtexts.len();
-        eprintln!("re-embedding {n} redacted chunk(s)…");
-        let t0 = Instant::now();
-        let vectors = embed_batched(embedder.as_mut(), &rtexts, |done| {
-            let secs = t0.elapsed().as_secs_f64().max(0.001);
-            eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
-            let _ = std::io::stderr().flush();
-        })?;
-        eprintln!(
-            "\r    embedded {n} chunk(s) in {:.1}s          ",
-            t0.elapsed().as_secs_f64()
-        );
-        Some(build_batch(model, &replacements, Some(&vectors))?)
+        let vectors = plan.embed(model, &mut None)?;
+        Some(build_batch(model, replacements, Some(&vectors))?)
     };
 
     // Rewrite the memory in a single Overwrite commit: every clean row (with its existing vector) plus
@@ -126,6 +78,7 @@ pub async fn run() -> Result<()> {
     dataset::build_indexes(&mut ds, ui::index_progress).await?;
     sweep(&ds).await?;
 
+    let RepairPlan { redacted_detectors, redacted_blocks, dropped_rows, dropped_blocks, dropped_detectors, .. } = plan;
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",
         redacted_detectors.len()
@@ -145,4 +98,82 @@ pub async fn run() -> Result<()> {
 async fn sweep(ds: &Dataset) -> Result<()> {
     eprintln!("deleting old versions…");
     dataset::delete_old_versions(ds).await
+}
+
+/// The same redaction policy applies to an entire memory and to blocks withheld from a push.
+pub(super) struct RepairPlan {
+    pub(super) remove: Vec<bool>,
+    pub(super) replacements: Vec<chunk::Chunk>,
+    redacted_detectors: Vec<String>,
+    dropped_detectors: Vec<String>,
+    pub(super) redacted_blocks: usize,
+    pub(super) dropped_blocks: usize,
+    dropped_rows: usize,
+}
+
+pub(super) fn plan(chunks: &[chunk::Chunk], scanner: &dyn scan::SecretScanner) -> Result<RepairPlan> {
+    // Reconstruct each block's contiguous text (so a secret split() cut across chunks is whole) and
+    // scan them all in one pass.
+    let blocks = chunk::reconstruct_blocks(chunks);
+    let texts: Vec<&str> = blocks.iter().map(|(_, text)| text.as_str()).collect();
+    eprintln!("scanning {} block(s) for secrets…", texts.len());
+    let found = scan::scan_blocks(&texts, scanner)?;
+
+    // From that single scan, decide each block: excise the secrets whose value matches and re-chunk
+    // the result; if any can't be matched, the block can't be safely redacted, so drop it whole.
+    // `remove[i]` marks an original row to drop (its block had a secret); `replacements` are the
+    // re-chunked redacted blocks to re-embed.
+    let mut remove = vec![false; chunks.len()];
+    let mut replacements: Vec<chunk::Chunk> = Vec::new();
+    let mut redacted_detectors: Vec<String> = Vec::new();
+    let mut dropped_detectors: Vec<String> = Vec::new();
+    let (mut redacted_blocks, mut dropped_blocks, mut dropped_rows) = (0usize, 0usize, 0usize);
+    for ((idxs, text), findings) in blocks.iter().zip(&found) {
+        if findings.is_empty() {
+            continue;
+        }
+        for &i in idxs {
+            remove[i] = true;
+        }
+        let r = scan::excise(text, findings);
+        // Excising one match can expose another: removing it from a long base64 run re-aligns the
+        // window the next is found in. So a redaction counts only if the result scans clean.
+        let clean = r.fully_redacted && scan::scan_blocks(&[r.text.as_str()], scanner)?[0].is_empty();
+        if clean {
+            replacements.extend(chunk::resplit(&chunks[idxs[0]], &r.text));
+            redacted_detectors.extend(r.removed_detectors);
+            redacted_blocks += 1;
+        } else {
+            dropped_detectors.extend(scan::detectors(findings));
+            dropped_blocks += 1;
+            dropped_rows += idxs.len();
+        }
+    }
+    Ok(RepairPlan { remove, replacements, redacted_detectors, dropped_detectors, redacted_blocks, dropped_blocks, dropped_rows })
+}
+
+impl RepairPlan {
+    pub(super) fn embed(&self, model: inference::EmbeddingModel, embedder: &mut Option<Box<dyn Embedder>>) -> Result<Vec<Vec<f32>>> {
+        if self.replacements.is_empty() {
+            return Ok(Vec::new());
+        }
+        if embedder.is_none() {
+            *embedder = Some(inference::embedder(model)?);
+        }
+        let embedder = embedder.as_mut().expect("just initialized");
+        let rtexts: Vec<&str> = self.replacements.iter().map(|c| c.text.as_str()).collect();
+        let n = rtexts.len();
+        eprintln!("re-embedding {n} redacted chunk(s)…");
+        let t0 = Instant::now();
+        let vectors = embed_batched(embedder.as_mut(), &rtexts, |done| {
+            let secs = t0.elapsed().as_secs_f64().max(0.001);
+            eprint!("\r    embedded {done}/{n}  ({:.0}/s)   ", done as f64 / secs);
+            let _ = std::io::stderr().flush();
+        })?;
+        eprintln!(
+            "\r    embedded {n} chunk(s) in {:.1}s          ",
+            t0.elapsed().as_secs_f64()
+        );
+        Ok(vectors)
+    }
 }

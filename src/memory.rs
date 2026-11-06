@@ -18,9 +18,12 @@ pub mod capture_store;
 pub mod card;
 pub mod dataset;
 pub mod fetch_store;
+pub mod held;
 pub mod lock;
 pub mod receipt;
 pub mod remote;
+pub mod swab;
+pub mod tombstone;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

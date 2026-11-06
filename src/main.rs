@@ -7,7 +7,7 @@
 
 use funes::agents;
 use funes::commands::target::Target;
-use funes::commands::{add, ask, bind, compact, index, mcp, push, recall, scrub, sketch, update};
+use funes::commands::{add, ask, bind, compact, index, mcp, push, recall, scrub, sketch, swab, update};
 use funes::hub;
 use funes::memory;
 use funes::ui::banner::Banner;
@@ -214,6 +214,12 @@ enum Cmd {
     /// flagged by an updated ruleset); needs no source transcript. Cleans the local memory only: it
     /// does NOT scrub an already-published remote, which the push gate can only stop adding to.
     Scrub,
+    /// Repair local blocks withheld by pushes to this memory; the next push can publish the repairs.
+    Swab {
+        /// The same remote memory named by push: `<org>/<repo>` or its `hf://` URI.
+        #[arg(value_name = "MEMORY")]
+        memory: String,
+    },
     /// Update funes in place: download the latest release binary for this platform and replace the
     /// running executable, then bring the installed agent integrations to their newest release.
     Update {
@@ -485,6 +491,10 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Scrub => scrub::run().await,
+        Cmd::Swab { memory } => {
+            println!("{}", swab::run(&memory).await?);
+            Ok(())
+        }
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,
         Cmd::Bind { memory } => bind::run(&memory).await,

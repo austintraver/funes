@@ -34,6 +34,11 @@ pub fn pushed_dir() -> PathBuf {
     dir().join("pushed")
 }
 
+/// Chunk ids whose source rows were removed by swab and must not be re-indexed.
+pub fn suppressed_chunks_file() -> PathBuf {
+    dir().join("suppressed-chunks.jsonl")
+}
+
 /// The memory this host is bound to, as typed; absent when the host is local.
 pub fn bound_file() -> PathBuf {
     dir().join("bound")
