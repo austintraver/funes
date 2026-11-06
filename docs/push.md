@@ -86,12 +86,9 @@ repaired need no further write.
 To seed the worklist with rows held before this worklist existed, run `funes push <memory>` once. The
 push gate scans the rows still pending for that remote and records any blocks it holds back.
 
-`funes swab <memory>` scans only the queued blocks in the local derived memory. It does not filter by
-the turns' timestamps: a block from an old conversation that was indexed today is included because
-the push gate queued its stable block coordinates. A secret whose value can be located safely is
-replaced with a `[REDACTED:<detector>]` marker, then that block is re-chunked and its replacement
-chunks are re-embedded. If a finding cannot be reconstructed safely, or the redacted block does not
-scan clean, swab drops the block. Clean rows outside the queued blocks are not scanned or rewritten.
+`funes swab <memory>` locates queued blocks by their transcript coordinates. This lookup can read identifier columns across historical fragments. Only the queued blocks' text goes to the secret scanner; unrelated text and vectors are not rewritten. A block from an old conversation indexed today is eligible as soon as a push withholds it.
+
+Where a secret can be located safely, swab replaces it with a `[REDACTED:<detector>]` marker, re-chunks the block, and embeds its replacements. If the secret cannot be located safely or the repaired text still triggers the scanner, swab drops the block.
 
 Each batch with dirty blocks makes one targeted Lance commit. Swab removes obsolete split ids
 from the current memory and records them so a later transcript re-index cannot restore their original
