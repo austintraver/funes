@@ -151,6 +151,35 @@ async fn index_then_read_surface() {
         "the sessions row is byte-stable"
     );
 
+    let exact = funes::commands::recall::sessions(
+        funes::memory::Memory::local(),
+        funes::commands::recall::SessionFilter {
+            session_ids: vec![session.clone(), "missing-session-id".into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(exact.contains(&session), "an exact existing id is returned: {exact}");
+    assert!(
+        exact.ends_with("1 sessions\n"),
+        "a missing id is omitted from the count: {exact}"
+    );
+
+    let missing = funes::commands::recall::sessions(
+        funes::memory::Memory::local(),
+        funes::commands::recall::SessionFilter {
+            session_ids: vec!["missing-session-id".into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        missing.contains("no session in ") && missing.contains(" matches\n"),
+        "a missing id returns the normal empty-match result: {missing}"
+    );
+
     // A limit of zero would render nothing, so it is an error that names the bounds.
     let zero = funes::commands::recall::sessions(
         funes::memory::Memory::local(),

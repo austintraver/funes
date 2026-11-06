@@ -70,6 +70,9 @@ pub struct GetRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SessionsRequest {
+    #[serde(default)]
+    #[schemars(description = "Keep only these exact session ids; supply multiple ids to select several sessions")]
+    pub session_ids: Vec<String>,
     #[schemars(description = "Keep only sessions whose checkout resolved to this repo, as `owner/name`")]
     pub repo: Option<String>,
     #[schemars(description = "Keep only sessions that started on or after this date, `YYYY-MM-DD`")]
@@ -252,11 +255,12 @@ impl Funes {
     }
 
     #[tool(
-        description = "Enumerate a memory's sessions, oldest first. Metadata only — when it started and when its last indexed turn was, harness, repo, turn count, id, and the prompt each opened with, which is the ask a session started from, not what it became. Filter by repo or date to get the session ids the other verbs take; a whole memory can run to thousands of rows."
+        description = "Enumerate a memory's sessions, oldest first. Metadata only — when it started and when its last indexed turn was, harness, repo, turn count, id, and the prompt each opened with. Filter by exact session ids, repo or date; a whole memory can run to thousands of rows."
     )]
     async fn sessions(
         &self,
         Parameters(SessionsRequest {
+            session_ids,
             repo,
             since,
             until,
@@ -266,6 +270,7 @@ impl Funes {
         }): Parameters<SessionsRequest>,
     ) -> String {
         let filter = recall::SessionFilter {
+            session_ids,
             repo,
             since,
             until,

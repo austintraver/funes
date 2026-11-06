@@ -115,16 +115,16 @@ impl Target {
     /// The pools a listing merges: the memory's sessions, and for the bound memory those this host
     /// still owes rows, which come from the local memory whole instead. The local side is read
     /// while the remote one waits on the network.
-    pub(crate) async fn session_pools(&self) -> Result<Vec<SessionPool>> {
+    pub(crate) async fn session_pools(&self, session_ids: &[String]) -> Result<Vec<SessionPool>> {
         let Some(uri) = self.overlaid() else {
-            return Ok(vec![SessionPool::open(&self.memory).await?]);
+            return Ok(vec![SessionPool::open_filtered(&self.memory, session_ids).await?]);
         };
-        let (pool, owed) = tokio::join!(SessionPool::open(&self.memory), async {
+        let (pool, owed) = tokio::join!(SessionPool::open_filtered(&self.memory, session_ids), async {
             let owed = receipt::owed_sessions(uri).await?;
             if owed.is_empty() {
                 return Ok(None);
             }
-            let mut local = SessionPool::open(&Memory::local()).await?;
+            let mut local = SessionPool::open_filtered(&Memory::local(), session_ids).await?;
             local.retain(|s| owed.contains(&s.session_id));
             anyhow::Ok(Some((local, owed)))
         });

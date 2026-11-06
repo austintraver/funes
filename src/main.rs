@@ -144,6 +144,9 @@ enum Cmd {
     },
     /// List a memory's sessions, oldest first.
     Sessions {
+        /// Keep only these exact session ids; repeat to select several sessions.
+        #[arg(long = "session", value_name = "ID")]
+        session_ids: Vec<String>,
         /// Keep only sessions whose checkout resolved to this repo (`owner/name`).
         #[arg(long, value_name = "OWNER/NAME")]
         repo: Option<String>,
@@ -395,6 +398,7 @@ async fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Sessions {
+            session_ids,
             repo,
             since,
             until,
@@ -403,6 +407,7 @@ async fn run() -> Result<()> {
             memory,
         } => {
             let filter = recall::SessionFilter {
+                session_ids,
                 repo,
                 since,
                 until,

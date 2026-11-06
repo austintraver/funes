@@ -15,7 +15,7 @@ is in it, and [`funes get`](recall.md#reading-turns-with-get) reads the turns th
 ## Listing sessions
 
 ```bash
-funes sessions [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>] [--memory <label>]
+funes sessions [--session <id> ...] [--repo <owner/name>] [--since <date>] [--until <date>] [--limit <n>] [--offset <n>] [--memory <label>]
 ```
 
 `sessions` lists what a memory holds, oldest first: its span (the first turn's timestamp to the
@@ -26,6 +26,7 @@ reading any of it.
 
 | flag | default | effect |
 |---|---|---|
+| `--session` | — | keep only the exact session id; repeat to select several ids. Missing ids are omitted. |
 | `--repo` | — | keep sessions whose checkout resolved to this `owner/name` |
 | `--since` / `--until` | — | keep sessions that started on or after / on or before a `YYYY-MM-DD` |
 | `--limit` | 50 | rows to list, keeping the most recent; capped at 200 |

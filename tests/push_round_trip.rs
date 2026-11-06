@@ -202,6 +202,7 @@ async fn push_round_trip_create_append_recall() {
     // The session it grew is owed, so the bound memory lists and reads it from the local memory,
     // whole; read as it stands, the remote shows its shorter copy.
     let all_sessions = || recall::SessionFilter {
+        session_ids: Vec::new(),
         repo: None,
         since: None,
         until: None,

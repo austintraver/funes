@@ -151,6 +151,7 @@ async fn a_tracker_thread_indexes_and_lists_without_agent_roles() {
     assert_eq!(column(&rows, "turn_uuid").len(), 3);
 
     let filter = SessionFilter {
+        session_ids: Vec::new(),
         repo: None,
         since: None,
         until: None,
