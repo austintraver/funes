@@ -488,10 +488,7 @@ async fn run() -> Result<()> {
             print!("{}", compact::run(memory::Memory::resolve(memory)).await?);
             Ok(())
         }
-        Cmd::Scrub { pending } => match pending {
-            Some(remote) => scrub::run_pending(&remote).await,
-            None => scrub::run().await,
-        },
+        Cmd::Scrub { pending } => scrub::run(pending.as_deref()).await,
         Cmd::Update { force } => update::run(force).await,
         Cmd::Mcp { memory } => mcp::run(memory).await,
         Cmd::Bind { memory } => bind::run(&memory).await,

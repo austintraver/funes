@@ -88,7 +88,7 @@ async fn scrub_redacts_an_escaped_key_in_place() {
 
     // Scrub with the real scanner: it matches the key's JSON-escaped form and excises it in place.
     std::env::remove_var("FUNES_TRUFFLEHOG");
-    funes::commands::scrub::run().await.unwrap();
+    funes::commands::scrub::run(None).await.unwrap();
 
     let after_key = funes::commands::recall::get(
         funes::memory::Memory::local(),

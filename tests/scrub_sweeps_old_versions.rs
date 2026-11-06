@@ -57,7 +57,7 @@ async fn scrub_with_nothing_to_redact_deletes_old_versions() {
         "setup: the residue should be on disk before scrub"
     );
 
-    funes::commands::scrub::run().await.unwrap();
+    funes::commands::scrub::run(None).await.unwrap();
     let left = support::files_containing(&memdir, residue);
     assert!(left.is_empty(), "residue still on disk after scrub: {left:?}");
 }

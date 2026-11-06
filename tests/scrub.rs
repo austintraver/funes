@@ -98,7 +98,7 @@ async fn scrub_redacts_an_existing_secret_in_place_with_the_memorys_model() {
         .await
         .unwrap();
     let address = dataset::row_ids(&covered_rows[0]).unwrap().get(0);
-    funes::commands::scrub::run_pending("test/memory").await.unwrap();
+    funes::commands::scrub::run(Some("test/memory")).await.unwrap();
     let after = open().await.unwrap();
     assert_eq!(after.version().version, before.version().version + 1);
     let covered_rows = dataset::scan_rows_with_ids(&after, &["id"], Some(covered))
@@ -119,10 +119,10 @@ async fn scrub_redacts_an_existing_secret_in_place_with_the_memorys_model() {
         !rows.iter().any(|c| c.id == missing.id),
         "the obsolete last split survived"
     );
-    funes::commands::scrub::run_pending("test/memory").await.unwrap();
+    funes::commands::scrub::run(Some("test/memory")).await.unwrap();
     assert_eq!(open().await.unwrap().version().version, after.version().version);
 
-    funes::commands::scrub::run().await.unwrap();
+    funes::commands::scrub::run(None).await.unwrap();
     let clean = recall::get(Memory::local(), session.into(), TurnRange::default())
         .await
         .unwrap();

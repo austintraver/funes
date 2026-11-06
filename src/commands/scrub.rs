@@ -18,25 +18,19 @@ use std::time::Instant;
 /// redact the matching values in place (re-chunked, re-embedded) or — when a value can't be matched
 /// (e.g. a key stored with escaped `\n`), or the redaction doesn't scan clean — drop the block
 /// whole. Fail-closed on the scanner: scrubbing is the whole point.
-pub async fn run() -> Result<()> {
-    scrub(None).await
-}
-
-pub async fn run_pending(spec: &str) -> Result<()> {
-    let Memory::Remote { uri } = Memory::parse(spec) else {
-        bail!("--pending requires a remote memory");
+pub async fn run(pending: Option<&str>) -> Result<()> {
+    let remote = match pending.map(Memory::parse) {
+        Some(Memory::Remote { uri }) => Some(uri),
+        Some(_) => bail!("--pending requires a remote memory"),
+        None => None,
     };
-    scrub(Some(&uri)).await
-}
-
-async fn scrub(pending: Option<&str>) -> Result<()> {
     let _lock = lock::MemoryLock::acquire()?;
     let Some(ds) = Memory::local().dataset().await? else {
         println!("no local memory to scrub");
         return Ok(());
     };
     let model = dataset::embedding_model(&ds)?;
-    let batches = if let Some(remote) = pending {
+    let batches = if let Some(remote) = remote.as_deref() {
         let pushed = receipt::load(remote).with_context(|| format!("no readable push receipt for {remote}"))?;
         let rows = dataset::pending_block_rows(&ds, &pushed).await?;
         if rows.iter().all(|b| b.num_rows() == 0) {
