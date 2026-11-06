@@ -106,6 +106,8 @@ Scrub does **not** alter an already-published remote. If a live credential reach
 rotate it first, then remediate the dataset separately; funes can prevent another upload but does not
 automate remote deletion.
 
+For a smaller local repair after a push, run `funes scrub --pending <user|org>/<memory>`. It reads this host's push receipt and scans a whole block if any chunk ID is missing. It writes only the blocks that need repair, without rebuilding indexes or deleting prior versions. The receipt records chunk IDs, not content hashes; use a full scrub to recheck previously published positions after a text edit or a scanner rule change.
+
 ## Publishing a selection: `--sessions`
 
 A push ships every embedded local chunk the remote doesn't have. To publish a *selection* instead,

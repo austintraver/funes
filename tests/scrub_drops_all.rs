@@ -69,7 +69,7 @@ async fn scrub_dropping_every_block_leaves_a_valid_empty_memory() {
 
     // Scrub with the real scanner: every block is unredactable, so the memory is rewritten empty.
     std::env::remove_var("FUNES_TRUFFLEHOG");
-    funes::commands::scrub::run().await.unwrap();
+    funes::commands::scrub::run(None).await.unwrap();
 
     // The empty Overwrite must leave a valid, reopenable memory with zero rows.
     let uri = funes::memory::dataset::table_uri(home::memory_dir());

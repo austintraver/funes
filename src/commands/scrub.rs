@@ -5,32 +5,44 @@
 use crate::home;
 use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch};
-use crate::memory::lock;
 use crate::memory::Memory;
+use crate::memory::{lock, receipt};
 use crate::{chunk, scan, ui};
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use lance::Dataset;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::time::Instant;
 
-/// Reconstruct each block, scan them all in one pass, and for any block holding a secret either
+/// Scrub every local block, or, with `pending`, only those not fully covered by the remote's push receipt.
+/// Reconstruct the selected blocks, scan them in one pass, and for any block holding a secret either
 /// redact the matching values in place (re-chunked, re-embedded) or — when a value can't be matched
 /// (e.g. a key stored with escaped `\n`), or the redaction doesn't scan clean — drop the block
 /// whole. Fail-closed on the scanner: scrubbing is the whole point.
-pub async fn run() -> Result<()> {
-    // scrub rewrites the whole table, so hold the memory lock to be the sole writer.
+pub async fn run(pending: Option<&str>) -> Result<()> {
+    let remote = match pending.map(Memory::parse) {
+        Some(Memory::Remote { uri }) => Some(uri),
+        Some(_) => bail!("--pending requires a remote memory"),
+        None => None,
+    };
     let _lock = lock::MemoryLock::acquire()?;
-    let uri = dataset::table_uri(home::memory_dir());
     let Some(ds) = Memory::local().dataset().await? else {
         println!("no local memory to scrub");
         return Ok(());
     };
     let model = dataset::embedding_model(&ds)?;
+    let batches = if let Some(remote) = remote.as_deref() {
+        let Some(rows) = pending_block_rows(&ds, remote).await? else {
+            println!("no pending blocks to scrub");
+            return Ok(());
+        };
+        vec![rows]
+    } else {
+        eprintln!("loading the local memory…");
+        dataset::scan_rows(&ds, &[], None, None).await?
+    };
     let scanner = scan::Trufflehog::find()?;
-
-    eprintln!("loading the local memory…");
-    let batches = dataset::scan_rows(&ds, &[], None, None).await?;
     let chunks = dataset::chunks(&batches);
     let total = chunks.len();
     if total == 0 {
@@ -77,8 +89,12 @@ pub async fn run() -> Result<()> {
         }
     }
     if !remove.iter().any(|&r| r) {
-        sweep(&ds).await?;
-        println!("memory is already clean ({total} chunks)");
+        if pending.is_some() {
+            println!("pending blocks already scan clean ({total} chunks)");
+        } else {
+            sweep(&ds).await?;
+            println!("memory is already clean ({total} chunks)");
+        }
         return Ok(());
     }
 
@@ -104,27 +120,16 @@ pub async fn run() -> Result<()> {
         Some(build_batch(model, &replacements, Some(&vectors))?)
     };
 
-    // Rewrite the memory in a single Overwrite commit: every clean row (with its existing vector) plus
-    // the re-chunked redacted blocks. One commit is deliberate — a delete-then-append is two commits,
-    // and an interrupt between them would drop the secret rows without writing their replacements,
-    // which for a source-gone session is permanent loss. Append-first isn't a safe alternative either:
-    // `cid` hashes only coordinates, so a same-piece-count re-split reuses the old ids and a later
-    // delete couldn't tell the fresh rows from the stale ones. (Cost: scrub rewrites the whole table,
-    // fine for a rare remediation.)
-    let mut out = Vec::new();
-    let mut base = 0usize;
-    for b in &batches {
-        let kept = dataset::keep_rows(b, |i| !remove[base + i])?;
-        if kept.num_rows() > 0 {
-            out.push(kept);
-        }
-        base += b.num_rows();
+    if pending.is_some() {
+        let dirty_ids = chunks
+            .iter()
+            .zip(&remove)
+            .filter_map(|(c, &dirty)| dirty.then_some(c.id.as_str()))
+            .collect::<Vec<_>>();
+        dataset::replace_scrubbed(&ds, &dirty_ids, replacement_batch).await?;
+    } else {
+        rewrite(&batches, &remove, replacement_batch, model).await?;
     }
-    out.extend(replacement_batch);
-    eprintln!("rewriting the memory…");
-    let mut ds = dataset::overwrite(&uri, out, model).await?;
-    dataset::build_indexes(&mut ds, ui::index_progress).await?;
-    sweep(&ds).await?;
 
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",
@@ -139,6 +144,68 @@ pub async fn run() -> Result<()> {
     }
     println!("{msg}");
     Ok(())
+}
+
+/// A receipt covers a block only when it contains every split. Select by identifiers first so
+/// fully covered blocks never have their text or vectors loaded for scanning.
+async fn pending_block_rows(ds: &Dataset, remote: &str) -> Result<Option<dataset::RecordBatch>> {
+    let pushed = receipt::load(remote).with_context(|| format!("no readable push receipt for {remote}"))?;
+    let keys = dataset::scan_rows_with_ids(ds, &["id", "session_id", "turn_uuid", "block_idx"], None).await?;
+    let mut blocks = HashMap::new();
+    for batch in &keys {
+        let ids = dataset::strs(batch, "id");
+        let sessions = dataset::strs(batch, "session_id");
+        let turns = dataset::strs(batch, "turn_uuid");
+        let indices = dataset::ints(batch, "block_idx");
+        let addresses = dataset::row_ids(batch)?;
+        for i in 0..batch.num_rows() {
+            let key = (sessions.get(i), turns.get(i), indices.get(i));
+            let (pending, rows) = blocks.entry(key).or_insert_with(|| (false, Vec::new()));
+            *pending |= !pushed.contains(ids.get(i));
+            rows.push(addresses.get(i));
+        }
+    }
+    let mut rows: Vec<_> = blocks
+        .into_values()
+        .filter(|(pending, _)| *pending)
+        .flat_map(|(_, rows)| rows)
+        .collect();
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    rows.sort_unstable();
+    Ok(Some(dataset::take_rows_without_vectors(ds, &rows).await?))
+}
+
+/// Overwrite the local memory with the retained rows and replacements, rebuild its indexes,
+/// and delete old versions.
+async fn rewrite(
+    batches: &[dataset::RecordBatch],
+    remove: &[bool],
+    replacement_batch: Option<dataset::RecordBatch>,
+    model: inference::EmbeddingModel,
+) -> Result<()> {
+    // Rewrite the memory in a single Overwrite commit: every clean row (with its existing vector) plus
+    // the re-chunked redacted blocks. One commit is deliberate — a delete-then-append is two commits,
+    // and an interrupt between them would drop the secret rows without writing their replacements,
+    // which for a source-gone session is permanent loss. Append-first isn't a safe alternative either:
+    // `cid` hashes only coordinates, so a same-piece-count re-split reuses the old ids and a later
+    // delete couldn't tell the fresh rows from the stale ones. (Cost: scrub rewrites the whole table,
+    // fine for a rare remediation.)
+    let mut out = Vec::new();
+    let mut base = 0usize;
+    for b in batches {
+        let kept = dataset::keep_rows(b, |i| !remove[base + i])?;
+        if kept.num_rows() > 0 {
+            out.push(kept);
+        }
+        base += b.num_rows();
+    }
+    out.extend(replacement_batch);
+    eprintln!("rewriting the memory…");
+    let mut ds = dataset::overwrite(&dataset::table_uri(home::memory_dir()), out, model).await?;
+    dataset::build_indexes(&mut ds, ui::index_progress).await?;
+    sweep(&ds).await
 }
 
 /// Leave no pre-scrub row readable on disk.

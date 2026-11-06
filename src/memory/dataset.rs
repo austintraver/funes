@@ -22,7 +22,8 @@ use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::optimize::{compact_files, plan_compaction, CompactionOptions};
 use lance::dataset::scanner::Scanner;
 use lance::dataset::{
-    Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched, WriteMode, WriteParams, ROW_ID,
+    Dataset, MergeInsertBuilder, MergeInsertWriteMode, WhenMatched, WhenNotMatched, WhenNotMatchedBySource, WriteMode,
+    WriteParams, ROW_ID,
 };
 use lance::index::vector::VectorIndexParams;
 use lance::index::{DatasetIndexExt, DatasetIndexInternalExt};
@@ -223,6 +224,52 @@ pub async fn take_rows(ds: &Dataset, row_ids: &[u64], columns: &[&str]) -> Resul
         ds.schema().project(columns)?
     };
     ds.take_rows(row_ids, projection).await.context("reading rows by id")
+}
+
+/// Read the selected rows without loading their embeddings.
+pub(crate) async fn take_rows_without_vectors(ds: &Dataset, rows: &[u64]) -> Result<RecordBatch> {
+    let columns: Vec<_> = ds
+        .schema()
+        .fields
+        .iter()
+        .filter(|f| f.name != "vector")
+        .map(|f| f.name.as_str())
+        .collect();
+    take_rows(ds, rows, &columns).await
+}
+
+/// Commit the repairs for a set of dirty blocks. Re-splitting can reuse a chunk id, create one,
+/// or retire one. Update reused ids only if their text changed, insert new ids, and delete only
+/// original ids from these blocks that have no replacement.
+pub(crate) async fn replace_scrubbed(
+    ds: &Dataset,
+    dirty_ids: &[&str],
+    replacements: Option<RecordBatch>,
+) -> Result<()> {
+    let schema = schema_of(ds);
+    let batch = match replacements {
+        Some(batch) => {
+            // Older memories may lack a column in today's chunk schema.
+            let columns = schema
+                .fields()
+                .iter()
+                .map(|f| batch.schema_ref().index_of(f.name()))
+                .collect::<Result<Vec<_>, _>>()?;
+            batch.project(&columns)?
+        }
+        None => RecordBatch::new_empty(schema),
+    };
+    let delete_if = WhenNotMatchedBySource::delete_if(ds, &in_list("id", dirty_ids.iter().copied()))?;
+    MergeInsertBuilder::try_new(Arc::new(ds.clone()), vec!["id".to_string()])?
+        .when_matched(WhenMatched::update_if(ds, "source.text != target.text")?)
+        .when_not_matched(WhenNotMatched::InsertAll)
+        .when_not_matched_by_source(delete_if)
+        .write_mode(MergeInsertWriteMode::RewriteRows)
+        .try_build()?
+        .execute_batches(vec![batch])
+        .await
+        .context("replacing scrubbed rows")?;
+    Ok(())
 }
 
 /// How many rows `filter` keeps (all rows for `None`).
