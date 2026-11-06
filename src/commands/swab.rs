@@ -34,8 +34,15 @@ pub async fn run(spec: &str) -> Result<String> {
             let vectors = plan.embed(model, &mut embedder)?;
             let replacements = dataset::build_batch(model, &plan.replacements, Some(&vectors))?;
             let fresh: HashSet<_> = plan.replacements.iter().map(|chunk| &chunk.id).collect();
-            let dirty: Vec<_> = chunks.iter().zip(&plan.remove).filter_map(|(c, dirty)| dirty.then_some(c)).collect();
-            let dirty_keys: HashSet<_> = dirty.iter().map(|c| held::BlockKey::new(&c.session_id, &c.turn_uuid, c.block_idx)).collect();
+            let dirty: Vec<_> = chunks
+                .iter()
+                .zip(&plan.remove)
+                .filter_map(|(c, dirty)| dirty.then_some(c))
+                .collect();
+            let dirty_keys: HashSet<_> = dirty
+                .iter()
+                .map(|c| held::BlockKey::new(&c.session_id, &c.turn_uuid, c.block_idx))
+                .collect();
             // Do this before the data commit. The original rows still exist if the commit fails;
             // after it succeeds reimporting a transcript must not recreate an obsolete split.
             tombstone::record(dirty.iter().filter(|c| !fresh.contains(&c.id)).map(|c| c.id.clone()))?;
@@ -49,11 +56,14 @@ pub async fn run(spec: &str) -> Result<String> {
                 }
             }
             let dirty_keys: Vec<_> = dirty_keys.into_iter().collect();
-            ds = swab::replace_blocks(&ds, &dirty_keys, &originals, replacements).await?.dataset;
+            ds = swab::replace_blocks(&ds, &dirty_keys, &originals, replacements).await?;
             redacted += plan.redacted_blocks;
             dropped += plan.dropped_blocks;
         }
         held::remove(&uri, &keys.iter().cloned().collect())?;
     }
-    Ok(format!("{uri}: swab checked {} withheld block(s) ({scanned_rows} local rows); redacted {redacted}, dropped {dropped}", queued.len()))
+    Ok(format!(
+        "{uri}: swab checked {} withheld block(s) ({scanned_rows} local rows); redacted {redacted}, dropped {dropped}",
+        queued.len()
+    ))
 }

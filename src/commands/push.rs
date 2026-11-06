@@ -31,7 +31,7 @@ use crate::memory::remote::{self, Appended, Compacted};
 use crate::memory::{Memory, MemoryState};
 use crate::ui::prompt::confirm;
 use crate::{chunk, scan, ui};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use chrono::Utc;
 use lance::Dataset;
@@ -418,7 +418,7 @@ pub async fn run_push(target: Memory, compact: bool, confirm: Confirm, sessions:
     let batches = dataset::restamped(&schema, rows)?;
 
     // Drop any row whose text still holds a secret — hold it back from the Hub rather than block the
-    // whole push. `funes scrub` redacts it in the local memory; the next push then ships it.
+    // whole push. `funes swab` repairs queued blocks in the local memory; a later push can ship them.
     let n_scanning: usize = batches.iter().map(|b| b.num_rows()).sum();
     eprintln!("scanning {n_scanning} chunk(s) for secrets…");
     let (batches, skipped) = drop_secret_rows(batches)?;
@@ -812,7 +812,7 @@ mod tests {
         assert!(note.contains("left untouched"), "note: {note}");
     }
 
-    use crate::traces::{Block, FORMAT_VERSION, Turn};
+    use crate::traces::{Block, Turn, FORMAT_VERSION};
     use std::process::Command;
 
     /// Mint a throwaway key (never committed, so funes ships no secret) of the given type, or None

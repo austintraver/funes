@@ -115,12 +115,17 @@ use, or several years of moderate use.
 ## Maintenance
 
 Indexing commits a new version rather than overwriting, so superseded index
-generations — and, after row-rewriting ops like `scrub`, orphaned data
-fragments — would otherwise accumulate. funes reaps them when it compacts the local
-memory (past a short grace window, so a concurrent read isn't cut off), keeping
-on-disk size close to the live figures above. `scrub` reaps every old version
-itself as it finishes, with no grace window, so no pre-scrub row stays readable
-on disk. A recall reading an old version at that moment can fail once.
+generations — and, after row-rewriting ops like `swab` or `scrub`, orphaned data
+fragments — would otherwise accumulate. Funes reaps old versions when it compacts
+the local memory (past a short grace window, so a concurrent read isn't cut off),
+which reclaims files no longer referenced by a retained version. `swab` updates
+only its queued blocks in the current version; old versions remain until cleanup.
+`scrub` removes old versions itself as it finishes, with no grace window, so a
+recall reading an old version at that moment can fail once. Lance compaction is
+configured not to materialize deletions, and scrub skips rewriting when the
+current rows are already clean. As a result, either operation can leave deleted
+bytes inside a live fragment; neither guarantees physical erasure of every old
+row value.
 
 Recall time grows with the number of fragments, so each compaction, at the end of
 an index run or once a push leaves 500 unindexed rows on a remote memory, merges the

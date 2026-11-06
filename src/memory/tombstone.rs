@@ -16,8 +16,8 @@ fn load_at(path: &Path) -> Result<HashSet<String>> {
     if !path.exists() {
         return Ok(HashSet::new());
     }
-    let contents = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading suppressed chunk ids at {}", path.display()))?;
+    let contents =
+        std::fs::read_to_string(path).with_context(|| format!("reading suppressed chunk ids at {}", path.display()))?;
     let mut ids = HashSet::new();
     for (line_no, line) in contents.lines().enumerate() {
         if line.is_empty() {

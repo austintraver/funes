@@ -7,8 +7,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
-use arrow_array::{Array, FixedSizeListArray, RecordBatch, StringArray};
+use anyhow::{Context, Result, anyhow, bail};
+use arrow_array::{Array, FixedSizeListArray, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::Schema;
 use futures::TryStreamExt;
 use lance::dataset::{
@@ -22,29 +22,16 @@ use super::held::BlockKey;
 const MAX_KEYS_PER_SCAN: usize = 64;
 const ROW_ADDR: &str = "_rowaddr";
 
-/// The output of a successful replacement.
-pub struct SwabReplacement {
-    /// The committed dataset, for use by the next batch or snapshot.
-    pub dataset: Dataset,
-    /// Existing chunk IDs that disappeared when blocks were rechunked or dropped.
-    pub removed_ids: Vec<String>,
-    /// Counts reported by Lance for the committed merge.
-    pub updated_rows: u64,
-    pub inserted_rows: u64,
-    pub deleted_rows: u64,
-}
-
 /// Read all current rows for `keys`, preserving physical row addresses for the read snapshot.
 ///
 /// A caller can pass larger worklists; this issues separate scans with at most 64 block keys each.
 /// Rows are returned in Arrow batches and retain the dataset schema plus `_rowaddr`.
 pub async fn read_blocks(ds: &Dataset, keys: &[BlockKey]) -> Result<Vec<RecordBatch>> {
-    let schema = Schema::from(ds.schema());
-    let columns: Vec<String> = schema.fields().iter().map(|field| field.name().clone()).collect();
-    if columns.is_empty() {
-        bail!("memory dataset has no columns");
-    }
-
+    let columns = vec![
+        "session_id".to_string(),
+        "turn_uuid".to_string(),
+        "block_idx".to_string(),
+    ];
     let mut batches = Vec::new();
     for key_group in keys.chunks(MAX_KEYS_PER_SCAN) {
         if key_group.is_empty() {
@@ -54,10 +41,27 @@ pub async fn read_blocks(ds: &Dataset, keys: &[BlockKey]) -> Result<Vec<RecordBa
         let mut scan = ds.scan();
         scan.project(&columns)?;
         scan.filter(&filter)?;
-        scan.with_row_address();
-        let mut stream = scan.try_into_stream().await.context("scanning dirty memory blocks")?;
-        while let Some(batch) = stream.try_next().await.context("reading dirty memory blocks")? {
-            batches.push(batch);
+        scan.with_row_id();
+        let mut stream = scan
+            .try_into_stream()
+            .await
+            .context("scanning dirty memory block addresses")?;
+        let mut row_ids = Vec::new();
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .context("reading dirty memory block addresses")?
+        {
+            let ids = batch
+                .column_by_name("_rowid")
+                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| anyhow!("block address scan lacks a uint64 _rowid column"))?;
+            row_ids.extend((0..ids.len()).map(|row| ids.value(row)));
+        }
+        if !row_ids.is_empty() {
+            let mut take = Arc::new(ds.clone()).take_builder(&row_ids, Arc::new(ds.schema().clone()))?;
+            take = take.with_row_address(true);
+            batches.push(take.execute().await.context("loading selected dirty memory rows")?);
         }
     }
     Ok(batches)
@@ -74,12 +78,12 @@ pub async fn replace_blocks(
     keys: &[BlockKey],
     originals: &[RecordBatch],
     replacements: RecordBatch,
-) -> Result<SwabReplacement> {
+) -> Result<Dataset> {
     if keys.is_empty() {
         bail!("a block replacement needs at least one block key");
     }
     validate_unique_keys(keys)?;
-    validate_replacement_schema(ds, &replacements)?;
+    let replacements = stamp_replacements_with_current_schema(ds, replacements)?;
 
     let key_set: HashSet<BlockKey> = keys.iter().cloned().collect();
     let old_ids = original_ids(originals, &key_set)?;
@@ -126,13 +130,7 @@ pub async fn replace_blocks(
         .await
         .context("committing repaired memory blocks")?;
 
-    Ok(SwabReplacement {
-        dataset: updated,
-        removed_ids,
-        updated_rows: pending.stats.num_updated_rows,
-        inserted_rows: pending.stats.num_inserted_rows,
-        deleted_rows: pending.stats.num_deleted_rows,
-    })
+    Ok(updated)
 }
 
 fn validate_unique_keys(keys: &[BlockKey]) -> Result<()> {
@@ -216,17 +214,36 @@ fn replacement_ids(replacements: &RecordBatch, keys: &HashSet<BlockKey>) -> Resu
     Ok(found)
 }
 
-fn validate_replacement_schema(ds: &Dataset, replacements: &RecordBatch) -> Result<()> {
-    let target = Schema::from(ds.schema());
-    if replacements.schema().as_ref() != &target {
+fn stamp_replacements_with_current_schema(ds: &Dataset, replacements: RecordBatch) -> Result<RecordBatch> {
+    let target = Arc::new(Schema::from(ds.schema()));
+    if replacements.num_columns() != target.fields().len() {
         bail!("replacement rows must use the complete current memory schema");
     }
-    Ok(())
+    let source_schema = replacements.schema();
+    let mut columns = Vec::with_capacity(target.fields().len());
+    for field in target.fields() {
+        let (index, source_field) = source_schema
+            .column_with_name(field.name())
+            .ok_or_else(|| anyhow!("replacement rows lack current memory field {}", field.name()))?;
+        if source_field.data_type() != field.data_type() {
+            bail!(
+                "replacement field {} has type {:?}; memory schema requires {:?}",
+                field.name(),
+                source_field.data_type(),
+                field.data_type()
+            );
+        }
+        columns.push(replacements.column(index).clone());
+    }
+    RecordBatch::try_new(target, columns).context("stamping replacement rows with the current memory schema")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::Chunk;
+    use crate::inference::EmbeddingModel;
+    use crate::memory::dataset;
     use arrow_array::{Float32Array, Int64Array, RecordBatchIterator};
     use arrow_schema::{DataType, Field};
     use tempfile::tempdir;
@@ -247,7 +264,9 @@ mod tests {
         ]))
     }
 
-    fn batch(rows: &[(&str, &str, &str, &str, i64, i64, [f32; 2])]) -> RecordBatch {
+    type TestRow<'a> = (&'a str, &'a str, &'a str, &'a str, i64, i64, [f32; 2]);
+
+    fn batch(rows: &[TestRow<'_>]) -> RecordBatch {
         let vectors = rows.iter().flat_map(|row| row.6).collect::<Vec<_>>();
         let vector_values: arrow_array::ArrayRef = Arc::new(Float32Array::from(vectors));
         let item_field = Arc::new(Field::new("item", DataType::Float32, true));
@@ -267,9 +286,9 @@ mod tests {
         .unwrap()
     }
 
-    fn reader(
-        batch: RecordBatch,
-    ) -> RecordBatchIterator<std::iter::Once<std::result::Result<RecordBatch, arrow_schema::ArrowError>>> {
+    type BatchReader = RecordBatchIterator<std::iter::Once<std::result::Result<RecordBatch, arrow_schema::ArrowError>>>;
+
+    fn reader(batch: RecordBatch) -> BatchReader {
         let schema = batch.schema();
         RecordBatchIterator::new(std::iter::once(Ok(batch)), schema)
     }
@@ -285,6 +304,24 @@ mod tests {
         ]);
         let ds = Dataset::write(reader(initial), &uri, None).await.unwrap();
         let keys = [BlockKey::new("session", "turn", 0)];
+
+        let mut address_scan = ds.scan();
+        address_scan.project(&["session_id", "turn_uuid", "block_idx"]).unwrap();
+        address_scan.filter(&block_filter(&keys)).unwrap();
+        address_scan.with_row_id();
+        let plan = address_scan.explain_plan(false).await.unwrap();
+        let target_read = plan
+            .lines()
+            .find(|line| line.trim_start().starts_with("LanceRead:"))
+            .unwrap();
+        assert!(
+            target_read.contains("projection=[session_id, turn_uuid, block_idx]"),
+            "{target_read}"
+        );
+        assert!(
+            !target_read.contains("text") && !target_read.contains("vector"),
+            "{target_read}"
+        );
 
         let blocks = read_blocks(&ds, &keys).await.unwrap();
         assert_eq!(blocks.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
@@ -317,20 +354,36 @@ mod tests {
             ),
         ]);
 
+        let delete_behavior = WhenNotMatchedBySource::delete_if(&ds, &block_filter(&keys)).unwrap();
+        let job = MergeInsertBuilder::try_new(Arc::new(ds.clone()), vec!["id".to_string()])
+            .unwrap()
+            .when_matched(WhenMatched::UpdateAll)
+            .when_not_matched(WhenNotMatched::InsertAll)
+            .when_not_matched_by_source(delete_behavior)
+            .write_mode(MergeInsertWriteMode::RewriteRows)
+            .try_build()
+            .unwrap();
+        let plan = job
+            .explain_plan(Some(replacements.schema().as_ref()), false)
+            .await
+            .unwrap();
+        let target_read = plan
+            .lines()
+            .find(|line| line.trim_start().starts_with("LanceRead:"))
+            .unwrap();
+        assert!(
+            target_read.contains("projection=[id, session_id, turn_uuid, block_idx]"),
+            "{target_read}"
+        );
+        assert!(
+            !target_read.contains("text") && !target_read.contains("vector"),
+            "{target_read}"
+        );
+
         let result = replace_blocks(&ds, &keys, &originals, replacements).await.unwrap();
-        assert_eq!(result.removed_ids, vec!["dirty-1"]);
-        assert_eq!(result.updated_rows, 1);
-        assert_eq!(result.inserted_rows, 1);
-        assert_eq!(result.deleted_rows, 1);
-        assert_eq!(result.dataset.count_rows(None).await.unwrap(), 3);
-        assert_eq!(
-            result.dataset.count_rows(Some("text = 'secret'".into())).await.unwrap(),
-            0
-        );
-        assert_eq!(
-            result.dataset.count_rows(Some("id = 'clean-0'".into())).await.unwrap(),
-            1
-        );
+        assert_eq!(result.count_rows(None).await.unwrap(), 3);
+        assert_eq!(result.count_rows(Some("text = 'secret'".into())).await.unwrap(), 0);
+        assert_eq!(result.count_rows(Some("id = 'clean-0'".into())).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -347,12 +400,48 @@ mod tests {
         let replacements = batch(&[]);
 
         let result = replace_blocks(&ds, &keys, &originals, replacements).await.unwrap();
-        assert_eq!(result.removed_ids, vec!["dirty-0"]);
-        assert_eq!(result.deleted_rows, 1);
-        assert_eq!(result.dataset.count_rows(None).await.unwrap(), 1);
+        assert_eq!(result.count_rows(None).await.unwrap(), 1);
+        assert_eq!(result.count_rows(Some("id = 'clean-0'".into())).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_embedded_funes_batch_can_delete_the_last_memory_row() {
+        let dir = tempdir().unwrap();
+        let uri = dir.path().join("chunks.lance").to_string_lossy().into_owned();
+        let model = EmbeddingModel::BgeSmallEn;
+        let chunk = Chunk {
+            id: "0123456789abcdef".to_string(),
+            text: "unrecoverable secret-bearing block".to_string(),
+            session_id: "session".to_string(),
+            workdir: String::new(),
+            turn_uuid: "turn".to_string(),
+            parent_uuid: None,
+            seq: 0,
+            ts: "2026-11-05T00:00:00Z".to_string(),
+            role: "assistant".to_string(),
+            block_type: "text".to_string(),
+            tool_name: None,
+            source_path: "fixture.jsonl".to_string(),
+            block_idx: 0,
+            split_idx: 0,
+            harness: "test".to_string(),
+            repo: String::new(),
+        };
+        let vector = vec![0.0; dataset::DIM as usize];
+        let initial = dataset::build_batch(model, &[chunk], Some(&[vector])).unwrap();
+        let ds = Dataset::write(reader(initial), &uri, None).await.unwrap();
+        let keys = [BlockKey::new("session", "turn", 0)];
+        let originals = read_blocks(&ds, &keys).await.unwrap();
+
+        // This is the same full-schema zero-row batch produced by swab when every selected block
+        // must be dropped and no replacement chunk remains to embed.
+        let replacements = dataset::build_batch(model, &[], Some(&[])).unwrap();
+        assert_eq!(replacements.num_rows(), 0);
         assert_eq!(
-            result.dataset.count_rows(Some("id = 'clean-0'".into())).await.unwrap(),
-            1
+            replacements.schema().field_with_name("vector").unwrap().data_type(),
+            &DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), dataset::DIM,)
         );
+        let result = replace_blocks(&ds, &keys, &originals, replacements).await.unwrap();
+        assert_eq!(result.count_rows(None).await.unwrap(), 0);
     }
 }

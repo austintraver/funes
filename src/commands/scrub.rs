@@ -40,7 +40,11 @@ pub async fn run() -> Result<()> {
     }
 
     let plan = plan(&chunks, &scanner)?;
-    let RepairPlan { ref remove, ref replacements, .. } = plan;
+    let RepairPlan {
+        ref remove,
+        ref replacements,
+        ..
+    } = plan;
     if !remove.iter().any(|&r| r) {
         sweep(&ds).await?;
         println!("memory is already clean ({total} chunks)");
@@ -78,7 +82,14 @@ pub async fn run() -> Result<()> {
     dataset::build_indexes(&mut ds, ui::index_progress).await?;
     sweep(&ds).await?;
 
-    let RepairPlan { redacted_detectors, redacted_blocks, dropped_rows, dropped_blocks, dropped_detectors, .. } = plan;
+    let RepairPlan {
+        redacted_detectors,
+        redacted_blocks,
+        dropped_rows,
+        dropped_blocks,
+        dropped_detectors,
+        ..
+    } = plan;
     let mut msg = format!(
         "scrubbed {total} rows: redacted {} secret(s) in {redacted_blocks} block(s)",
         redacted_detectors.len()
@@ -94,7 +105,8 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Leave no pre-scrub row readable on disk.
+/// Remove old dataset versions and files that are no longer referenced. A clean current dataset
+/// may still contain deleted bytes behind Lance deletion masks in its live fragments.
 async fn sweep(ds: &Dataset) -> Result<()> {
     eprintln!("deleting old versions…");
     dataset::delete_old_versions(ds).await
@@ -149,11 +161,23 @@ pub(super) fn plan(chunks: &[chunk::Chunk], scanner: &dyn scan::SecretScanner) -
             dropped_rows += idxs.len();
         }
     }
-    Ok(RepairPlan { remove, replacements, redacted_detectors, dropped_detectors, redacted_blocks, dropped_blocks, dropped_rows })
+    Ok(RepairPlan {
+        remove,
+        replacements,
+        redacted_detectors,
+        dropped_detectors,
+        redacted_blocks,
+        dropped_blocks,
+        dropped_rows,
+    })
 }
 
 impl RepairPlan {
-    pub(super) fn embed(&self, model: inference::EmbeddingModel, embedder: &mut Option<Box<dyn Embedder>>) -> Result<Vec<Vec<f32>>> {
+    pub(super) fn embed(
+        &self,
+        model: inference::EmbeddingModel,
+        embedder: &mut Option<Box<dyn Embedder>>,
+    ) -> Result<Vec<Vec<f32>>> {
         if self.replacements.is_empty() {
             return Ok(Vec::new());
         }

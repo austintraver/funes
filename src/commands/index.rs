@@ -11,16 +11,16 @@
 use super::compact;
 use crate::chunk::{self, Tier};
 use crate::home;
-use crate::inference::{self, Embedder, embed_batched};
-use crate::memory::Memory;
+use crate::inference::{self, embed_batched, Embedder};
 use crate::memory::dataset::{self, build_batch, model};
 use crate::memory::lock;
 use crate::memory::tombstone;
+use crate::memory::Memory;
 use crate::scan;
 use crate::traces::spool;
 use crate::traces::{self, repo, source};
 use crate::ui::prompt::confirm;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use lance::Dataset;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -1438,13 +1438,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((embedded, checks), (2, vec![1, 2]));
-        assert!(
-            pending_embeddings(&ds)
-                .await
-                .unwrap()
-                .by_tier
-                .contains_key(&Tier::ToolResult)
-        );
+        assert!(pending_embeddings(&ds)
+            .await
+            .unwrap()
+            .by_tier
+            .contains_key(&Tier::ToolResult));
 
         let pending = pending_embeddings(&ds).await.unwrap();
         let embedded = embed_pending(&mut ds, &mut embedder, &pending, |_| {

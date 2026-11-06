@@ -48,63 +48,79 @@ One publish per memory at a time on a machine: a push that starts while another 
 says so and stops, and the next one picks up what it left. The hooks [`funes add`](add.md) installs
 run this at session boundaries automatically; see [automation.md](automation.md).
 
-## Keeping secrets out: the gate and `funes scrub`
+## Keeping secrets out: the push gate, `swab`, and `scrub`
 
 When TruffleHog is available, indexing redacts detected credentials before storing a session. That
 first pass is best-effort: local indexing still works without the scanner because the local memory
 has not crossed a publication boundary. It prints a warning that index-time redaction is disabled.
 
 Push is the hard boundary. A separate, **always-on, fail-closed gate** requires TruffleHog and scans
-the rows about to leave the machine. It reconstructs complete content blocks before scanning, so a
-secret split across chunks cannot evade detection. If any chunk of a block contains a secret, every
-chunk of that block is held back; unrelated clean rows still publish with a warning. Only when that
-leaves *nothing* to publish does push exit non-zero (code `2`):
+the rows about to leave the machine. It reconstructs content blocks from those rows before scanning,
+so a secret split across chunks can be detected. If a block contains a secret, every outgoing row
+from that block is held back; unrelated clean rows still publish with a warning. Each held block is
+queued by its session id, turn id, and block number. This coordinate identifies the block even when
+its source turn has an old timestamp but was indexed only recently. Only when the gate leaves
+*nothing* to publish does push exit non-zero (code `2`):
 
 ```console
 $ funes push <user|org>/funes-memory
 scanning 512 chunk(s) for secrets…
-hf://datasets/<user|org>/funes-memory: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes scrub`, then push again
+hf://datasets/<user|org>/funes-memory: nothing published — held back 3 row(s) with secrets (AWS×2, PrivateKey×1); run `funes swab <user|org>/funes-memory`, then push again
 $ echo $?
 2
 ```
 
 A hold-back is easy to miss when the hooks push in the background, so `funes status` scans this
-host's pending rows for the bound memory the same way and reports what a push would hold back, until a
-scrub lets them publish.
+host's pending rows for the bound memory the same way and reports what a push would hold back.
 
-`funes push` and `funes scrub` refuse to run unscanned when TruffleHog is unavailable. See the
-[upstream installation documentation](https://github.com/trufflesecurity/trufflehog#installation).
-funes looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`; see
-[configuration.md](configuration.md#environment-reference).
+### What `funes swab` changes
+
+Run `funes swab <memory>` once a day for the memory that push targets. Push can continue running at
+session boundaries throughout the day: it keeps withholding secret-bearing rows and adds their block
+coordinates to a per-remote local worklist. The worklist stores no block text or scanner findings.
+Repeated pushes merge new keys into it, including pushes limited by `--sessions`. A swab and a push
+to the same remote take the same lock, so a swab drains a stable set of keys. A failed or interrupted
+swab leaves unprocessed keys available for retry.
+
+To seed the worklist with rows held before this worklist existed, run `funes push <memory>` once. The
+push gate scans the rows still pending for that remote and records any blocks it holds back.
+
+`funes swab <memory>` scans only the queued blocks in the local derived memory. It does not filter by
+the turns' timestamps: a block from an old conversation that was indexed today is included because
+the push gate queued its stable block coordinates. A secret whose value can be located safely is
+replaced with a `[REDACTED:<detector>]` marker, then that block is re-chunked and its replacement
+chunks are re-embedded. If a finding cannot be reconstructed safely, or the redacted block does not
+scan clean, swab drops the block. Clean rows outside the queued blocks are not scanned or rewritten.
+
+The replacement is one targeted Lance commit for the queued blocks. Swab removes obsolete split ids
+from the current memory and records them so a later transcript re-index cannot restore their original
+text. Once the repair succeeds, swab retires those block keys from the worklist. The next ordinary
+`funes push <memory>` can publish the repaired rows that the gate previously held back.
+
+Swab changes what is publishable in the **current local memory**; it does not retract data already
+published to the Hub. It also does not immediately remove prior local Lance versions from disk. The
+cleanup of old versions reclaims files that are no longer referenced, but a live fragment can still
+contain deleted bytes behind a deletion mask. Local compaction does not materialize those deletions.
 
 ### What `funes scrub` changes
 
-`funes scrub` repairs the **local derived memory** in place, including sessions whose source
-transcripts no longer exist. It takes the local writer lock, reconstructs and scans every stored
-block, then makes one replacement commit:
+`funes scrub` is the broader local remediation. It repairs the local derived memory in place,
+including sessions whose source transcripts are gone, by reconstructing and scanning every stored
+block. A safely locatable secret is replaced and re-embedded; a block that cannot be safely redacted
+is dropped. Clean rows retain their embeddings, while the vector and full-text indexes are rebuilt
+after the replacement. Scrub removes older dataset versions and files that are no longer referenced.
+If the current dataset is already clean, scrub only removes old versions; it does not rewrite live
+fragments. Lance compaction also leaves deletions masked rather than materializing them, so neither
+operation guarantees that deleted bytes in a live fragment have been physically erased.
 
-- A secret whose value can be located safely is replaced with a `[REDACTED:<detector>]` marker. The
-  block is re-chunked and its replacement chunks are re-embedded.
-- If a finding cannot be reconstructed safely—for example, an encoded value with no reliable byte
-  match—the entire block is dropped instead of risking a partial redaction.
-- A redaction is kept only if the redacted block scans clean. Excising one match can expose another
-  (removing one from a long base64 run re-aligns the window the next is found in), and such a block
-  is dropped rather than stored.
-- Clean rows retain their existing embeddings. The vector and full-text indexes are rebuilt after
-  the replacement.
+Neither swab nor scrub edits source transcripts or changes an already-published remote. If a live
+credential reached the Hub, revoke or rotate it first, then remediate the remote dataset separately;
+the push gate prevents later uploads but does not automate remote deletion.
 
-Scrub then deletes every older version of the memory from disk, so the pre-scrub rows can't be read
-back from the dataset's files. It does this even when it finds nothing to redact, so rerunning scrub
-also removes the old versions an earlier scrub left.
-
-The source transcripts are never modified. Scrub reports how many secrets and blocks it redacted and
-how many rows it had to drop. A completed scrub leaves a memory that scans clean, so the next
-`funes push <memory>` has nothing left to hold back; the repaired local rows pass through the
-independent egress gate.
-
-Scrub does **not** alter an already-published remote. If a live credential reached the Hub, revoke or
-rotate it first, then remediate the dataset separately; funes can prevent another upload but does not
-automate remote deletion.
+`funes push`, `funes swab`, and `funes scrub` refuse to run unscanned when TruffleHog is unavailable.
+See the [upstream installation documentation](https://github.com/trufflesecurity/trufflehog#installation).
+funes looks for it on `PATH`, or at the path set by `FUNES_TRUFFLEHOG`; see
+[configuration.md](configuration.md#environment-reference).
 
 ## Publishing a selection: `--sessions`
 

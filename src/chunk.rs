@@ -236,8 +236,8 @@ fn reconstruct(pieces: &[&str]) -> String {
 }
 
 /// Group `chunks` into blocks and reconstruct each block's contiguous text in one step — the single
-/// entry point both the push gate and `scrub` use to scan whole blocks. Returns, in first-seen block
-/// order, each block's chunk indices (ordered by `split_idx`) paired with its reconstructed text, so
+/// entry point the push gate, `swab`, and `scrub` use to scan whole blocks. Returns, in first-seen
+/// block order, each block's chunk indices (ordered by `split_idx`) paired with its reconstructed text, so
 /// a per-block scan result maps straight back to the rows it covers.
 pub(crate) fn reconstruct_blocks(chunks: &[Chunk]) -> Vec<(Vec<usize>, String)> {
     group_blocks(chunks)

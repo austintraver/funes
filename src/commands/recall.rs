@@ -1587,8 +1587,10 @@ async fn push_coverage_lines(local: &Dataset, memory: &Memory, uri: &str) -> Str
     if let Some(held) = &coverage.held {
         let _ = writeln!(
             out,
-            "  {} pending row(s) hold secrets ({}) — run `funes scrub` first",
-            held.rows, held.summary
+            "  {} pending row(s) hold secrets ({}) — run `funes swab {}` before pushing again",
+            held.rows,
+            held.summary,
+            memory.label()
         );
     }
     out

@@ -70,15 +70,18 @@ validates a producer's output without writing anything, so run it before wiring 
   session end and again at the next session start, catching up anything a missed end left behind —
   a disconnect, a closed window. Which events those are for each agent is in its README.
 - **Serialized in the binary.** funes holds an advisory lock while it mutates the local memory, so
-  only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`, `funes
-  scrub`). A run that hits the lock fails loudly and re-sweeps next turn (indexing is idempotent).
+  only one writer touches it at a time, whatever launched it (a hook, a manual `funes index`,
+  `funes swab`, or `funes scrub`). A run that hits the lock fails loudly and re-sweeps next turn
+  (indexing is idempotent).
   Reads take no lock. `funes push` takes one of its own, per remote memory — it only reads the local
   memory, so it never blocks an index — and a publish that finds another in flight steps aside; the
   next session start sweeps it. Nothing is serialized across machines: two hosts publishing to one
   memory still race on the Hub.
-- **Secrets held back.** funes redacts credentials at index time; on push, a separate always-on gate
-  withholds any chunk that still contains one — the clean rows publish, and the push exits non-zero
-  (code `2`) only if that leaves nothing to publish. Run `funes scrub`, then the next push includes it.
+- **Secrets held back.** Indexing redacts credentials best-effort; push has a separate always-on,
+  fail-closed gate. It withholds secret-bearing rows and records their block coordinates for a later
+  `funes swab <memory>`. A daily swab repairs only those queued blocks, and a later push can publish
+  the repaired rows. `funes scrub` remains the full-memory scan and removes older local versions
+  and unreferenced files; it does not guarantee physical erasure of deleted bytes in live fragments.
 - **The card rides along.** A push to a memory at the repo root creates the repo's dataset card
   (tagged `funes`) and keeps its stats fresh — in the same commit as the data. A hand-written
   card is never touched.

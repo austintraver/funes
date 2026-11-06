@@ -93,7 +93,7 @@ pub fn add(memory_uri: &str, additions: impl IntoIterator<Item = BlockKey>) -> R
 }
 
 fn add_at(path: &Path, additions: impl IntoIterator<Item = BlockKey>) -> Result<()> {
-    let mut keys = load_at(&path)?;
+    let mut keys = load_at(path)?;
     keys.extend(additions);
     write_at(path, &keys)
 }
@@ -105,7 +105,7 @@ pub fn remove(memory_uri: &str, retired: &HashSet<BlockKey>) -> Result<()> {
 }
 
 fn remove_at(path: &Path, retired: &HashSet<BlockKey>) -> Result<()> {
-    let mut keys = load_at(&path)?;
+    let mut keys = load_at(path)?;
     keys.retain(|key| !retired.contains(key));
     write_at(path, &keys)
 }
