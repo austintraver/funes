@@ -152,6 +152,8 @@ async fn scrub(pending: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Overwrite the local memory with the retained rows and replacements, rebuild its indexes,
+/// and delete old versions.
 async fn rewrite(
     batches: &[dataset::RecordBatch],
     remove: &[bool],
